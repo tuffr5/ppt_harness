@@ -1,0 +1,89 @@
+{
+  "name": "core",
+  "description": "Twelve briefs across the shapes decks actually take, plus follow-up turns that edit what the first turn built. Written by hand so every one is readable and debuggable.",
+  "tasks": [
+    {
+      "id": "board-quarterly",
+      "kind": "generate",
+      "brief": "Build a four-slide Q3 board update. EMEA churn went 4.1% in Q1 to 6.0% in Q2 to 8.3% in Q3, all of it mid-market, while the rest of the world held at 3.9, 4.0 and 4.1. Expansion revenue is up 41% with net revenue retention at 108%. We want sign-off on two Berlin hires at 240k. Open with a cover, put the three headline figures on a stat row, chart the churn trend against the rest of the world, and close with the ask.",
+      "expects": {"min_slides": 4, "components": ["stat_row", "chart"], "clean": true},
+      "follow_ups": [
+        "Make every title state the finding rather than the topic.",
+        "The chart should compare EMEA against the rest of the world side by side, not overlaid."
+      ]
+    },
+    {
+      "id": "sales-qbr",
+      "kind": "generate",
+      "brief": "A five-slide quarterly business review for a sales team: pipeline grew 22% to 14.2M, win rate fell from 31% to 24%, average deal size is flat at 48k, and the team is three reps short in the north. Open with where we landed, then why win rate moved, then the hiring ask.",
+      "expects": {"min_slides": 5, "components": ["stat_row"], "clean": true},
+      "follow_ups": ["Cut it to four slides without losing the hiring ask."]
+    },
+    {
+      "id": "research-findings",
+      "kind": "generate",
+      "brief": "Three slides on a study: we ran 480 sessions across six countries, 62% of participants abandoned onboarding at the payment step, and the drop is twice as large on mobile. Recommend moving payment to the end.",
+      "expects": {"min_slides": 3, "clean": true},
+      "follow_ups": ["Add a slide comparing mobile against desktop as two columns."]
+    },
+    {
+      "id": "product-launch",
+      "kind": "generate",
+      "brief": "A five-slide internal launch update: the beta shipped to 1,200 accounts, activation is 38% against a 30% target, two enterprise blockers remain (SSO and audit logs), and GA is planned for six weeks out. End with what we need from the room.",
+      "expects": {"min_slides": 5, "components": ["timeline", "takeaway", "stat_row"], "clean": true}
+    },
+    {
+      "id": "postmortem",
+      "kind": "generate",
+      "brief": "Four slides on an outage: the API was degraded for 47 minutes, 3% of requests failed, the cause was a cache eviction storm after a config change, and the fix is a staged rollout plus a rate limiter. No blame, and be specific about the timeline.",
+      "expects": {"min_slides": 4, "components": ["timeline"], "clean": true},
+      "follow_ups": ["Move the detail on the config change into the speaker notes and leave the claim on the slide."]
+    },
+    {
+      "id": "strategy-memo",
+      "kind": "generate",
+      "brief": "Six slides arguing we should move upmarket: mid-market churn is 8.3% against 2.1% for enterprise, enterprise deals are 6x larger but take 3x longer to close, and we would need two solution engineers. Make the case, then the cost, then the ask.",
+      "expects": {"min_slides": 6, "components": ["comparison"], "clean": true},
+      "follow_ups": ["The comparison slide should set enterprise against mid-market directly."]
+    },
+    {
+      "id": "hiring-plan",
+      "kind": "generate",
+      "brief": "Three slides on headcount: we are 42 people, plan to reach 55 by year end, the gap is concentrated in support (6) and engineering (5), and the budget is 2.4M. Show the shape of the team before and after.",
+      "expects": {"min_slides": 3, "components": ["stat_row"], "clean": true}
+    },
+    {
+      "id": "one-number",
+      "kind": "generate",
+      "brief": "A single slide whose whole job is one number: net revenue retention is 108%, up from 96% a year ago. Nothing else on it.",
+      "expects": {"min_slides": 1, "max_slides": 2, "clean": true},
+      "notes": "Tests restraint. A model that fills the slide with bullets has missed the brief."
+    },
+    {
+      "id": "agenda-and-sections",
+      "kind": "generate",
+      "brief": "A seven-slide deck with a cover, an agenda, and three sections — market, product, money — each announced by a divider, and a closing ask. One line of content per section is enough.",
+      "expects": {"min_slides": 7, "components": ["agenda", "section_break"], "clean": true},
+      "notes": "Structure rather than content. Exercises layout frames the other tasks skip."
+    },
+    {
+      "id": "long-copy",
+      "kind": "generate",
+      "brief": "Two slides summarising this: 'Our support burden has grown faster than our customer base for four consecutive quarters, driven mainly by a long tail of configuration questions that documentation has never covered adequately, and the team has absorbed it through overtime rather than through hiring, which is not sustainable into next year and is beginning to show up in response times and in attrition.'",
+      "expects": {"min_slides": 2, "clean": true},
+      "notes": "Prose that must be cut down. The budget will refuse a verbatim paste, which is the point."
+    },
+    {
+      "id": "table-of-numbers",
+      "kind": "generate",
+      "brief": "Two slides: one holding a table of the last four quarters with revenue, churn and headcount, and one stating what the table shows. Revenue 8.1, 8.9, 9.4, 11.2 million. Churn 4.1, 5.2, 6.0, 8.3 percent. Headcount 33, 36, 39, 42.",
+      "expects": {"min_slides": 2, "components": ["data_table"], "clean": true}
+    },
+    {
+      "id": "customer-story",
+      "kind": "generate",
+      "brief": "Four slides telling one customer's story: they came in on a trial, hit the onboarding wall twice, a solutions engineer rebuilt their import, and they now run 140 seats. Use their words where you can — they said 'we nearly gave up in week two'.",
+      "expects": {"min_slides": 4, "components": ["quote"], "clean": true}
+    }
+  ]
+}

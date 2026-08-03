@@ -1,0 +1,92 @@
+{
+ "suite": "core",
+ "environment": {
+  "when": "2026-08-02T20:50:27+00:00",
+  "model": "deepseek-v4-flash",
+  "python": "3.11.15",
+  "platform": "Darwin 25.5.0 (arm64)",
+  "reference_renderer": "powerpoint",
+  "browser": true
+ },
+ "scorecard": {
+  "tasks": 1,
+  "ran": 1,
+  "met": 1,
+  "sound": 1,
+  "fit_rate": 1.0,
+  "slides": 4,
+  "clean_slides": 4,
+  "refusals": 0,
+  "tool_calls": 18,
+  "rounds": 10,
+  "seconds": 124.9,
+  "review_findings": 0,
+  "violations": 0,
+  "parts_lost": 0,
+  "refusal_rate": 0.0,
+  "findings_per_slide": 0.0
+ },
+ "tasks": [
+  {
+   "task": "postmortem",
+   "kind": "generate",
+   "ok": true,
+   "met": true,
+   "error": "",
+   "expectations": {
+    "min_slides": true,
+    "clean": true,
+    "has:timeline": true
+   },
+   "fit": {
+    "slides": 4,
+    "clean_slides": 4,
+    "overflow_px": 0.0,
+    "worst_slide": null,
+    "fit_rate": 1.0
+   },
+   "friction": {
+    "rounds": 10,
+    "tool_calls": 18,
+    "refusals": 0,
+    "refusal_codes": {},
+    "repairs": 0,
+    "seconds": 124.9,
+    "refusal_rate": 0.0
+   },
+   "integrity": {
+    "exported": true,
+    "violations": [],
+    "parts_before": 0,
+    "parts_after": 49,
+    "parts_lost": [],
+    "inherited_problems": 0,
+    "sound": true
+   },
+   "shape": {
+    "components": {
+     "title_slide": 1,
+     "slide_title": 3,
+     "timeline": 1,
+     "bullets": 1,
+     "comparison": 1
+    },
+    "variants": {
+     "title_slide:centered": 1,
+     "slide_title:plain": 3,
+     "timeline:vertical": 1,
+     "bullets:plain": 1,
+     "comparison:split": 1
+    },
+    "layouts": {
+     "title": 1,
+     "stack": 3
+    },
+    "words": 181,
+    "notes_slides": 4,
+    "review_findings": 0,
+    "review_rules": {}
+   }
+  }
+ ]
+}

@@ -1,0 +1,117 @@
+{
+  "description": "Near-monochrome, one accent, maximum contrast. When the numbers should be the only colour on the slide.",
+  "theme": {
+    "id": "graphite",
+    "source": "authored",
+    "palette": {
+      "bg": "#FFFFFF",
+      "surface": "#F2F2F2",
+      "rule": "#D6D6D6",
+      "ink": "#111111",
+      "ink_muted": "#565656",
+      "brand": "#111111",
+      "brand_ink": "#FFFFFF",
+      "accents": [
+        "#C2410C",
+        "#111111",
+        "#0F766E",
+        "#4338CA"
+      ],
+      "positive": "#0F766E",
+      "negative": "#C2410C"
+    },
+    "type": {
+      "families": {
+        "display": "'Helvetica Neue', Helvetica, Arial, sans-serif",
+        "body": "'Helvetica Neue', Helvetica, Arial, sans-serif"
+      },
+      "scale": {
+        "deck_title": {
+          "family": "display",
+          "size": 50.0,
+          "weight": 700,
+          "line": 57.0,
+          "track": -0.015,
+          "italic": false
+        },
+        "slide_title": {
+          "family": "display",
+          "size": 32.0,
+          "weight": 700,
+          "line": 40.0,
+          "track": 0.0,
+          "italic": false
+        },
+        "block_title": {
+          "family": "body",
+          "size": 24.0,
+          "weight": 600,
+          "line": 31.0,
+          "track": 0.0,
+          "italic": false
+        },
+        "body": {
+          "family": "body",
+          "size": 20.0,
+          "weight": 400,
+          "line": 29.0,
+          "track": 0.0,
+          "italic": false
+        },
+        "stat": {
+          "family": "display",
+          "size": 44.0,
+          "weight": 700,
+          "line": 50.0,
+          "track": -0.02,
+          "italic": false
+        },
+        "label": {
+          "family": "body",
+          "size": 16.0,
+          "weight": 500,
+          "line": 22.0,
+          "track": 0.0,
+          "italic": false
+        },
+        "caption": {
+          "family": "body",
+          "size": 15.0,
+          "weight": 400,
+          "line": 21.0,
+          "track": 0.0,
+          "italic": false
+        }
+      },
+      "floor": 15.0
+    },
+    "grid": {
+      "canvas": [
+        1280,
+        720
+      ],
+      "margin": 72,
+      "columns": 12,
+      "gutter": 16,
+      "baseline": 4
+    },
+    "spacing": [
+      4,
+      8,
+      12,
+      16,
+      24,
+      32,
+      48,
+      64
+    ],
+    "shape": {
+      "radius": 0,
+      "rule_weight": 4,
+      "card_fill": "surface",
+      "shadow": "none"
+    },
+    "layouts": [],
+    "inferred": []
+  }
+}

@@ -1,0 +1,117 @@
+{
+  "description": "Serif display on warm paper. For a narrative deck that will be read as much as presented \u2014 a strategy memo, a research summary.",
+  "theme": {
+    "id": "editorial",
+    "source": "authored",
+    "palette": {
+      "bg": "#FFFDF9",
+      "surface": "#F4EEE4",
+      "rule": "#E2D8C8",
+      "ink": "#1A1613",
+      "ink_muted": "#6B5E52",
+      "brand": "#8C2F1E",
+      "brand_ink": "#FFFFFF",
+      "accents": [
+        "#8C2F1E",
+        "#1F6F5C",
+        "#8A6410",
+        "#37474F"
+      ],
+      "positive": "#1F6F5C",
+      "negative": "#8C2F1E"
+    },
+    "type": {
+      "families": {
+        "display": "Georgia, 'Times New Roman', 'Source Han Serif', serif",
+        "body": "Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif"
+      },
+      "scale": {
+        "deck_title": {
+          "family": "display",
+          "size": 56.0,
+          "weight": 700,
+          "line": 64.0,
+          "track": -0.015,
+          "italic": false
+        },
+        "slide_title": {
+          "family": "display",
+          "size": 36.0,
+          "weight": 700,
+          "line": 45.0,
+          "track": 0.0,
+          "italic": false
+        },
+        "block_title": {
+          "family": "body",
+          "size": 24.0,
+          "weight": 600,
+          "line": 31.0,
+          "track": 0.0,
+          "italic": false
+        },
+        "body": {
+          "family": "body",
+          "size": 22.0,
+          "weight": 400,
+          "line": 31.0,
+          "track": 0.0,
+          "italic": false
+        },
+        "stat": {
+          "family": "display",
+          "size": 44.0,
+          "weight": 700,
+          "line": 50.0,
+          "track": -0.02,
+          "italic": false
+        },
+        "label": {
+          "family": "body",
+          "size": 16.0,
+          "weight": 500,
+          "line": 22.0,
+          "track": 0.0,
+          "italic": false
+        },
+        "caption": {
+          "family": "body",
+          "size": 15.0,
+          "weight": 400,
+          "line": 21.0,
+          "track": 0.0,
+          "italic": false
+        }
+      },
+      "floor": 15.0
+    },
+    "grid": {
+      "canvas": [
+        1280,
+        720
+      ],
+      "margin": 80,
+      "columns": 12,
+      "gutter": 16,
+      "baseline": 4
+    },
+    "spacing": [
+      4,
+      8,
+      12,
+      16,
+      24,
+      32,
+      48,
+      64
+    ],
+    "shape": {
+      "radius": 2,
+      "rule_weight": 4,
+      "card_fill": "surface",
+      "shadow": "none"
+    },
+    "layouts": [],
+    "inferred": []
+  }
+}

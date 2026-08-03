@@ -1,0 +1,88 @@
+[project]
+name = "ppt-harness"
+version = "0.0.1"
+description = "Agentic harness for creating, editing and inspecting presentations"
+requires-python = ">=3.11"
+dependencies = [
+    "python-pptx>=1.0.2",   # surgical read-modify-write on real .pptx packages
+    "pydantic>=2.9",        # deck model + tool schemas
+    "fonttools>=4.55",      # real font metrics for budgets and fitting
+    "uharfbuzz>=0.42",      # shaping — must match what layout engines do
+    "lxml>=5.3",            # OOXML patching below python-pptx
+    "click>=8.1",           # CLI adapter
+]
+
+[project.optional-dependencies]
+render = ["playwright>=1.49"]                     # test-time oracle + screenshots
+claude = ["anthropic>=0.120"]                     # Claude, natively
+agent = ["openai>=1.60"]                          # any OpenAI-chat-compatible endpoint
+deepseek = ["openai>=1.60"]                       # DeepSeek — same client, its own host
+web = ["fastapi>=0.115", "uvicorn>=0.32", "openai>=1.60", "anthropic>=0.120"]
+all = ["playwright>=1.49", "openai>=1.60", "anthropic>=0.120",
+       "fastapi>=0.115", "uvicorn>=0.32"]
+
+[dependency-groups]
+# Development tooling, not a feature of the package. `uv sync` installs these by default;
+# `--no-dev` and a plain `pip install ppt-harness` do not, which is the point.
+dev = [
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+    "ruff>=0.8",
+    "httpx>=0.27",
+    "pillow>=10.0",   # builds the demo fixture and scores fidelity comparisons
+]
+
+[project.scripts]
+ppt-harness = "ppt_harness.adapters.cli:cli"
+ppt-harness-mcp = "ppt_harness.adapters.mcp_server:main"
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.package-data]
+# Skills are markdown *data* inside the package, so they need declaring or a wheel ships
+# the loader with nothing to load. Path is relative to the package, which is what the
+# previous `../skills` declaration got wrong.
+ppt_harness = ["skills/**/*.md", "templates/*.json", "bench/suites/*.json"]
+
+[tool.setuptools.packages.find]
+include = ["ppt_harness*"]
+# Subpackages carry no __init__.py — an init that only restates the directory name is a
+# file to keep in sync for nothing. Namespace discovery finds them regardless.
+namespaces = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+# Benchmarks are cloned into the working directory, and their code is not ours to lint. The
+# whole point of `bench/adapters` is that a public benchmark's evaluator runs unmodified —
+# so `ruff --fix` must never be able to reach one.
+extend-exclude = [".harness"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = [
+    "SIM117",  # nested `with` reads better when the outer one is a pytest.raises
+    # CJK punctuation is the subject matter, not a typo. Kinsoku rules and script
+    # detection are written with the real characters on purpose.
+    "RUF001", "RUF002", "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# web.py embeds the whole client page as one raw string. Wrapping its CSS and JS to a
+# Python line limit would hurt the thing the limit exists to protect.
+"ppt_harness/adapters/web.py" = ["E501"]
+# Scanning a system font directory meets genuinely malformed faces. A bad font must be
+# skipped, not crash the index — and there is no useful narrower exception type.
+"ppt_harness/render/fonts.py" = ["BLE001", "S112"]
+# A crashed tool must not take the server down; it is reported as a JSON-RPC error instead.
+"ppt_harness/adapters/mcp_server.py" = ["BLE001"]
+
+[tool.uv]
+# The package itself is installed editable, so a source change is picked up without a
+# reinstall — the harness is developed and used from the same tree.
+package = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

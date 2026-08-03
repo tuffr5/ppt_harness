@@ -1,0 +1,117 @@
+{
+  "description": "Cool and corporate. A blue brand, a grotesque throughout, generous rules \u2014 the safe choice for a board or a customer.",
+  "theme": {
+    "id": "slate",
+    "source": "authored",
+    "palette": {
+      "bg": "#FFFFFF",
+      "surface": "#F4F6FA",
+      "rule": "#DDE3EC",
+      "ink": "#0F172A",
+      "ink_muted": "#55617A",
+      "brand": "#1F4FD8",
+      "brand_ink": "#FFFFFF",
+      "accents": [
+        "#1F4FD8",
+        "#0E7C66",
+        "#B45309",
+        "#6D28D9"
+      ],
+      "positive": "#0E7C66",
+      "negative": "#B4532A"
+    },
+    "type": {
+      "families": {
+        "display": "Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif",
+        "body": "Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif"
+      },
+      "scale": {
+        "deck_title": {
+          "family": "display",
+          "size": 52.0,
+          "weight": 700,
+          "line": 60.0,
+          "track": -0.015,
+          "italic": false
+        },
+        "slide_title": {
+          "family": "display",
+          "size": 34.0,
+          "weight": 700,
+          "line": 42.0,
+          "track": 0.0,
+          "italic": false
+        },
+        "block_title": {
+          "family": "body",
+          "size": 24.0,
+          "weight": 600,
+          "line": 31.0,
+          "track": 0.0,
+          "italic": false
+        },
+        "body": {
+          "family": "body",
+          "size": 21.0,
+          "weight": 400,
+          "line": 30.0,
+          "track": 0.0,
+          "italic": false
+        },
+        "stat": {
+          "family": "display",
+          "size": 44.0,
+          "weight": 700,
+          "line": 50.0,
+          "track": -0.02,
+          "italic": false
+        },
+        "label": {
+          "family": "body",
+          "size": 16.0,
+          "weight": 500,
+          "line": 22.0,
+          "track": 0.0,
+          "italic": false
+        },
+        "caption": {
+          "family": "body",
+          "size": 15.0,
+          "weight": 400,
+          "line": 21.0,
+          "track": 0.0,
+          "italic": false
+        }
+      },
+      "floor": 15.0
+    },
+    "grid": {
+      "canvas": [
+        1280,
+        720
+      ],
+      "margin": 64,
+      "columns": 12,
+      "gutter": 16,
+      "baseline": 4
+    },
+    "spacing": [
+      4,
+      8,
+      12,
+      16,
+      24,
+      32,
+      48,
+      64
+    ],
+    "shape": {
+      "radius": 6,
+      "rule_weight": 4,
+      "card_fill": "surface",
+      "shadow": "none"
+    },
+    "layouts": [],
+    "inferred": []
+  }
+}

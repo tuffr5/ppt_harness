@@ -1,0 +1,59 @@
+{
+ "corpus": "/private/tmp/claude-501/-Users-duanbin-Downloads-projects-ppt-harness/5105b085-3f85-4e9d-bff5-ce8f344c18ae/scratchpad/corpus",
+ "edit": true,
+ "decks": 3,
+ "opened": 3,
+ "preserved": 3,
+ "open_rate": 1.0,
+ "preservation_rate": 1.0,
+ "slides": 15,
+ "opaque_shapes": 4,
+ "with_violations": 0,
+ "lost_parts": [],
+ "failures": [],
+ "seconds": 0.3,
+ "results": [
+  {
+   "path": "/private/tmp/claude-501/-Users-duanbin-Downloads-projects-ppt-harness/5105b085-3f85-4e9d-bff5-ce8f344c18ae/scratchpad/corpus/brand-template.pptx",
+   "ok": true,
+   "slides": 1,
+   "freeform_slides": 1,
+   "opaque_shapes": 0,
+   "parts_before": 38,
+   "parts_after": 39,
+   "lost": [],
+   "violations": [],
+   "inherited": 0,
+   "error": "",
+   "seconds": 0.21
+  },
+  {
+   "path": "/private/tmp/claude-501/-Users-duanbin-Downloads-projects-ppt-harness/5105b085-3f85-4e9d-bff5-ce8f344c18ae/scratchpad/corpus/deck.pptx",
+   "ok": true,
+   "slides": 7,
+   "freeform_slides": 7,
+   "opaque_shapes": 2,
+   "parts_before": 61,
+   "parts_after": 61,
+   "lost": [],
+   "violations": [],
+   "inherited": 0,
+   "error": "",
+   "seconds": 0.05
+  },
+  {
+   "path": "/private/tmp/claude-501/-Users-duanbin-Downloads-projects-ppt-harness/5105b085-3f85-4e9d-bff5-ce8f344c18ae/scratchpad/corpus/demo.pptx",
+   "ok": true,
+   "slides": 7,
+   "freeform_slides": 7,
+   "opaque_shapes": 2,
+   "parts_before": 61,
+   "parts_after": 61,
+   "lost": [],
+   "violations": [],
+   "inherited": 0,
+   "error": "",
+   "seconds": 0.04
+  }
+ ]
+}

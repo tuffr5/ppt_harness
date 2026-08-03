@@ -1,0 +1,115 @@
+{
+ "benchmark": "SlidesBench (AutoPresent)",
+ "repo": ".harness/bench/external/AutoPresent",
+ "domain": "food",
+ "variant": "instruction.txt",
+ "examples": 5,
+ "scored": 4,
+ "ours": {
+  "color": 0.0,
+  "match": 78.7,
+  "position": 68.4,
+  "text": 69.4
+ },
+ "identity_baseline": {
+  "color": 37.5,
+  "match": 100.0,
+  "position": 98.8,
+  "text": 100.0
+ },
+ "note": "match and text are the fair dimensions. position and color score similarity to a reference slide's layout, which a component-based harness does not reproduce by design \u2014 no tool it exposes accepts a coordinate. Read every figure against identity_baseline: their own reference scores 25 on color against itself.",
+ "results": [
+  {
+   "example": "food/slide_1",
+   "ok": true,
+   "error": "",
+   "scores": {
+    "match": 0.657,
+    "text": 1.0,
+    "color": 0.0,
+    "position": 0.779
+   },
+   "baseline": {
+    "match": 1.0,
+    "text": 1.0,
+    "color": 0.25,
+    "position": 1.0
+   },
+   "blocks_generated": 0,
+   "blocks_reference": 0,
+   "generated": ".harness/bench/slidesbench-detailed/slide_1/deck.pptx"
+  },
+  {
+   "example": "food/slide_2",
+   "ok": false,
+   "error": "RuntimeError: _dict = {\"match\": block_match_score(gen_blocks, ref_blocks, matching)}\n                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/duanbin/Downloads/projects/ppt_harness/.harness/bench/external/AutoPresent/evaluate/page_eval.py\", line 96, in block_match_score\n    return matched_area / sum_area\n           ~~~~~~~~~~~~~^~~~~~~~~~\nZeroDivisionError: division by zero",
+   "scores": {
+    "match": 0.0
+   },
+   "baseline": {},
+   "blocks_generated": 0,
+   "blocks_reference": 0,
+   "generated": ".harness/bench/slidesbench-detailed/slide_2/deck.pptx"
+  },
+  {
+   "example": "food/slide_3",
+   "ok": true,
+   "error": "",
+   "scores": {
+    "match": 0.552,
+    "text": 0.544,
+    "color": 0.0,
+    "position": 0.642
+   },
+   "baseline": {
+    "match": 1.0,
+    "text": 1.0,
+    "color": 0.435,
+    "position": 0.9520000000000001
+   },
+   "blocks_generated": 0,
+   "blocks_reference": 0,
+   "generated": ".harness/bench/slidesbench-detailed/slide_3/deck.pptx"
+  },
+  {
+   "example": "food/slide_4",
+   "ok": true,
+   "error": "",
+   "scores": {
+    "match": 0.9740000000000001,
+    "text": 0.664,
+    "color": 0.0,
+    "position": 0.664
+   },
+   "baseline": {
+    "match": 1.0,
+    "text": 1.0,
+    "color": 0.43799999999999994,
+    "position": 1.0
+   },
+   "blocks_generated": 0,
+   "blocks_reference": 0,
+   "generated": ".harness/bench/slidesbench-detailed/slide_4/deck.pptx"
+  },
+  {
+   "example": "food/slide_5",
+   "ok": true,
+   "error": "",
+   "scores": {
+    "match": 0.966,
+    "text": 0.568,
+    "color": 0.0,
+    "position": 0.652
+   },
+   "baseline": {
+    "match": 1.0,
+    "text": 1.0,
+    "color": 0.375,
+    "position": 1.0
+   },
+   "blocks_generated": 0,
+   "blocks_reference": 0,
+   "generated": ".harness/bench/slidesbench-detailed/slide_5/deck.pptx"
+  }
+ ]
+}

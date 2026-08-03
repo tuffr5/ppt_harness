@@ -1,0 +1,204 @@
+"""Mode transitions — DESIGN §1.1, §7, PLAN B5.
+
+The two doors between the tiers.
+
+**Eject** is one-way and always safe: a managed slide already knows its own geometry, so
+freezing it into absolute shapes loses nothing. It exists because the catalog will never
+cover everything, and a harness with no exit is one people work around.
+
+**Adopt** is the hard direction, and it is a *proposal*. Recognising four evenly-spaced
+boxes each holding a big number and a small label as a `stat_row` is pattern-matching, not
+understanding — and acting on it reflows the slide. So the classifier reports what it
+thinks and how sure it is, and a person decides. DESIGN §7: never a silent inference.
+
+The classifier reads **arrangement**, not meaning: how many shapes, how regular their sizes,
+whether they line up, how their type sizes relate. That is deliberately shallow. A deeper
+one would be right more often and wrong less legibly, and the failure mode of a confident
+wrong reflow is a slide someone has to rebuild.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
+
+from ..components import registry
+from ..state.document import Block, Mode, Shape, Slide, Theme
+
+#: Below this, the classifier says it does not know rather than guessing.
+MIN_CONFIDENCE = 0.55
+
+#: Two lengths within this ratio count as "the same size" to the eye.
+SAME_SIZE = 0.12
+
+#: Two edges within this fraction of the slide count as aligned.
+ALIGNED = 0.02
+
+
+@dataclass
+class Guess:
+    component: str
+    variant: str
+    confidence: float
+    because: list[str] = field(default_factory=list)
+    slots: dict[str, Any] = field(default_factory=dict)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"component": self.component, "variant": self.variant,
+                "confidence": round(self.confidence, 2), "because": self.because}
+
+
+# ------------------------------------------------------------------------ eject
+
+
+def eject(slide: Slide, theme: Theme, cx: int, cy: int) -> list[Shape]:
+    """Freeze a managed slide's blocks into absolute shapes.
+
+    Lossless by construction: the expander already decides every box, so this writes down
+    what it decided. What is lost is the *ability to re-derive* it — which is exactly what
+    makes the door one-way.
+    """
+    from ..render import expand
+    from ..state import slots as slot_render
+
+    canvas_w, canvas_h = theme.grid.canvas
+    frozen: list[Shape] = []
+
+    for laid_out in expand.expand_slide(theme, slide):
+        block = slide.block(laid_out.block_id)
+        if block is None:
+            continue
+        value = block.slots.get(laid_out.slot)
+        if not value:
+            continue
+        x, y, w, h = laid_out.box.emu(canvas_w, canvas_h, cx, cy)
+        frozen.append(Shape(
+            id=f"{laid_out.block_id}_{laid_out.slot}",
+            ooxml_id=0,
+            type="text_box",
+            frame={"x": x, "y": y, "cx": w, "cy": h},
+            role=laid_out.role,
+            text=slot_render.slot_text(value),
+            align=laid_out.align,
+            type_spec=laid_out.spec,
+        ))
+    return frozen
+
+
+# -------------------------------------------------------------------- classifier
+
+
+def _spread(values: list[float]) -> float:
+    """How unlike each other these numbers are, 0 = identical."""
+    if not values:
+        return 1.0
+    biggest = max(values)
+    return 0.0 if biggest == 0 else (biggest - min(values)) / biggest
+
+
+def _text_shapes(slide: Slide) -> list[Shape]:
+    return [s for s in slide.shapes if s.text and not s.opaque]
+
+
+def _signals(slide: Slide, theme: Theme) -> dict[str, Any]:
+    """What the arrangement looks like. Numbers only — no reading of the words."""
+    shapes = _text_shapes(slide)
+    canvas_w = theme.grid.canvas[0] or 1
+    return {
+        "count": len(shapes),
+        "size_spread": _spread([float(s.frame.cx) for s in shapes]),
+        "height_spread": _spread([float(s.frame.cy) for s in shapes]),
+        "same_row": len({round(s.frame.y / max(1, canvas_w) / ALIGNED) for s in shapes}) == 1
+        if shapes else False,
+        "short_text": all(len(s.text or "") <= 24 for s in shapes) if shapes else False,
+        "has_title": any((s.role or "").endswith("title") for s in slide.shapes),
+    }
+
+
+def classify(slide: Slide, theme: Theme) -> Guess | None:
+    """What this slide's arrangement resembles, and how sure that is.
+
+    Returns `None` below `MIN_CONFIDENCE` — "I do not know" is a better answer than a
+    confident reflow of a slide nobody asked to change.
+    """
+    if slide.mode is not Mode.FREEFORM:
+        return None
+    shapes = _text_shapes(slide)
+    if len(shapes) < 2:
+        return None
+
+    signals = _signals(slide, theme)
+    body = [s for s in shapes if not (s.role or "").endswith("title")]
+    because: list[str] = []
+    score = 0.0
+
+    regular = signals["size_spread"] <= SAME_SIZE and signals["height_spread"] <= SAME_SIZE
+    if regular:
+        score += 0.4
+        because.append(f"{len(body)} shapes of near-identical size")
+    if signals["same_row"]:
+        score += 0.2
+        because.append("aligned on one row")
+    if signals["short_text"]:
+        score += 0.15
+        because.append("every label is short")
+
+    if len(body) in (3, 4) and regular and signals["short_text"]:
+        component, variant = "stat_row", "flat"
+        score += 0.15
+        because.append("three or four short figures reads as a stat row")
+    elif len(body) in (4, 6) and regular:
+        component, variant = "card_grid", "2x2" if len(body) == 4 else "2x3"
+        because.append("an even grid of equal blocks")
+        score += 0.1
+    elif len(body) >= 3 and not regular:
+        component, variant = "bullets", "plain"
+        score += 0.25
+        because.append("a stack of unequal text blocks reads as a list")
+    else:
+        return None
+
+    ordered = sorted(body, key=lambda s: (s.frame.y, s.frame.x))
+    return Guess(component=component, variant=variant, confidence=min(score, 0.95),
+                 because=because,
+                 slots={"items": [s.text or "" for s in ordered]})
+
+
+def proposal(slide: Slide, theme: Theme) -> dict[str, Any] | None:
+    """The before/after a person is shown before anything moves."""
+    guess = classify(slide, theme)
+    if guess is None or guess.confidence < MIN_CONFIDENCE:
+        return None
+    comp = registry.COMPONENTS.get(guess.component)
+    if comp is None:
+        return None
+    return {
+        **guess.as_dict(),
+        "before": [{"id": s.id, "text": s.text} for s in _text_shapes(slide)],
+        "after": {"component": guess.component, "variant": guess.variant,
+                  "slots": guess.slots},
+        "warning": ("adoption reflows the slide: shapes move to where the component puts "
+                    "them, and anything the harness does not model is dropped"),
+    }
+
+
+def adopted_blocks(slide: Slide, theme: Theme, new_id) -> list[Block] | None:
+    """The blocks an adoption would produce, or `None` if it is not confident enough."""
+    guess = classify(slide, theme)
+    if guess is None or guess.confidence < MIN_CONFIDENCE:
+        return None
+
+    blocks: list[Block] = []
+    title = next((s for s in slide.shapes if (s.role or "").endswith("title") and s.text),
+                 None)
+    if title is not None:
+        blocks.append(Block(id=new_id("bk"), region="header", component="slide_title",
+                            variant="plain", slots={"title": title.text}))
+
+    comp = registry.COMPONENTS.get(guess.component)
+    region = "body"
+    if comp and region not in comp.regions:
+        region = comp.regions[0]
+    blocks.append(Block(id=new_id("bk"), region=region, component=guess.component,
+                        variant=guess.variant, slots=guess.slots))
+    return blocks
