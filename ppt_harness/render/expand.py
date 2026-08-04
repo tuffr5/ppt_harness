@@ -148,6 +148,34 @@ def region_by_name(theme: Theme, name: str) -> Box | None:
     return None
 
 
+def _bands(present: list[tuple[str, registry.SlotSpec]],
+           ) -> list[list[tuple[str, registry.SlotSpec]]]:
+    """Group consecutive slots into horizontal bands by declared width share.
+
+    A slot joins the band being built while there is room for its share; otherwise it opens
+    the next one. Declaration order therefore decides adjacency, which keeps the catalog
+    readable: `left` then `right` is what a reader already expects to mean side by side.
+
+    Every share defaulting to 1.0 makes each slot its own band, so a component that never
+    mentions width is laid out exactly as it was before bands existed.
+    """
+    bands: list[list[tuple[str, registry.SlotSpec]]] = []
+    current: list[tuple[str, registry.SlotSpec]] = []
+    used = 0.0
+    for name, spec in present:
+        share = spec.width_share if 0 < spec.width_share <= 1 else 1.0
+        # The epsilon is for shares that are meant to fill a band but cannot say so exactly
+        # in binary — three thirds being the case that matters.
+        if current and used + share > 1.0 + 1e-9:
+            bands.append(current)
+            current, used = [], 0.0
+        current.append((name, spec))
+        used += share
+    if current:
+        bands.append(current)
+    return bands
+
+
 def expand_block(theme: Theme, block: Block, box: Box) -> list[LaidOutSlot]:
     """Divide one block's box among its slots by declared height share."""
     comp = registry.get(block.component)
@@ -165,36 +193,51 @@ def expand_block(theme: Theme, block: Block, box: Box) -> list[LaidOutSlot]:
     # disabled to prevent.
     gap *= overrides.gap_factor(block.overrides)
 
-    total_share = sum(spec.height_share for _, spec in present) or 1.0
-    free = box.h - gap * (len(present) - 1)
+    bands = _bands(present)
+    # A band is as tall as its tallest member, so two slots sharing a row cost the height of
+    # one. Summing over bands rather than over slots is what reclaims the space the stacked
+    # layout would have spent putting them under each other.
+    band_heights = [max(spec.height_share for _, spec in band) for band in bands]
+    total_share = sum(band_heights) or 1.0
+    free = box.h - gap * (len(bands) - 1)
 
     out: list[LaidOutSlot] = []
     y = box.y
-    for name, spec in present:
-        h = free * (spec.height_share / total_share)
-        value = block.slots[name]
-        items = len(value) if isinstance(value, list) else 1
-        # Only a list is arranged; a title with `per_row` on its variant is still one box.
-        # Reading the variant's number for a `prose` slot would silently halve its width.
-        across = variant.per_row if spec.shape == "list" else 1
-        out.append(
-            LaidOutSlot(
-                block_id=block.id,
-                slot=name,
-                box=Box(x=box.x, y=y, w=box.w, h=h),
-                spec=theme.type.scale[spec.role],
-                role=spec.role,
-                align=overrides.OVERRIDES["align"].clamp(
-                    block.overrides.get("align", variant.align)),
-                max_lines=spec.max_lines,
-                items=items,
-                component=block.component,
-                shape=spec.shape,
-                overrides=overrides.clamp_all(block.overrides),
-                columns=max(1, across),
-                cell_gap=CELL_GAP * scale,
+    for band, share in zip(bands, band_heights, strict=True):
+        h = free * (share / total_share)
+        # Shares are normalised across the band, so two halves fill the width even after the
+        # gap is taken out of it, and a band that declares less than a full width still fills
+        # its row rather than leaving a ragged edge.
+        widths = [spec.width_share if 0 < spec.width_share <= 1 else 1.0 for _, spec in band]
+        inner_gap = CELL_GAP * scale if len(band) > 1 else 0.0
+        usable = box.w - inner_gap * (len(band) - 1)
+        x = box.x
+        for (name, spec), width_share in zip(band, widths, strict=True):
+            w = usable * (width_share / (sum(widths) or 1.0))
+            value = block.slots[name]
+            items = len(value) if isinstance(value, list) else 1
+            # Only a list is arranged; a title with `per_row` on its variant is still one box.
+            # Reading the variant's number for a `prose` slot would silently halve its width.
+            across = variant.per_row if spec.shape == "list" else 1
+            out.append(
+                LaidOutSlot(
+                    block_id=block.id,
+                    slot=name,
+                    box=Box(x=x, y=y, w=w, h=h),
+                    spec=theme.type.scale[spec.role],
+                    role=spec.role,
+                    align=overrides.OVERRIDES["align"].clamp(
+                        block.overrides.get("align", variant.align)),
+                    max_lines=spec.max_lines,
+                    items=items,
+                    component=block.component,
+                    shape=spec.shape,
+                    overrides=overrides.clamp_all(block.overrides),
+                    columns=max(1, across),
+                    cell_gap=CELL_GAP * scale,
+                )
             )
-        )
+            x += w + inner_gap
         y += h + gap
     return out
 

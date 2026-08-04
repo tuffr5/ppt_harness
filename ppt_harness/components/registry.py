@@ -41,6 +41,15 @@ class SlotSpec:
     #: Fraction of the region's height this slot may occupy. Shares within a component sum
     #: to <= 1 after gaps.
     height_share: float = 1.0
+    #: Fraction of the block's width. Consecutive slots whose shares fit within 1.0 sit
+    #: side by side in one band; the default of 1.0 gives every slot its own band, which is
+    #: the stacked layout every component had before this existed.
+    #:
+    #: `comparison` is why: two `list` slots set against each other are only a comparison if
+    #: they are *beside* each other. Stacked, the opposition is gone — the reader sees one
+    #: list of ten things, and `per_row` cannot help because it arranges the items within a
+    #: slot, never the slots themselves.
+    width_share: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -261,13 +270,17 @@ COMPONENTS: dict[str, Component] = {
             "title": SlotSpec("title", role="block_title", required=False, max_lines=1,
                               height_share=0.16),
             "left": SlotSpec("list", role="body", max_items=5, max_lines=2,
-                             height_share=0.42),
+                             height_share=0.84, width_share=0.5),
             "right": SlotSpec("list", role="body", max_items=5, max_lines=2,
-                              height_share=0.42),
+                              height_share=0.84, width_share=0.5),
         },
+        # `per_row=1`: the sides are columns now, so each one stacks its own items. The old
+        # `per_row=2` arranged the items *within* a side, which flowed one list across two
+        # columns and then the other beneath it — ten cells in reading order, and no
+        # comparison anywhere on the slide.
         variants={
-            "split": Variant("split", per_row=2),
-            "table": Variant("table", per_row=2),
+            "split": Variant("split", per_row=1),
+            "table": Variant("table", per_row=1),
         },
     ),
     "data_table": Component(

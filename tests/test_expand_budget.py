@@ -74,6 +74,53 @@ def test_a_block_in_a_region_the_layout_lacks_is_refused() -> None:
         expand.expand_slide(THEME, slide)
 
 
+def test_a_comparisons_two_sides_sit_beside_each_other() -> None:
+    """The bug this component is named for: stacked sides are not a comparison.
+
+    `left` and `right` sharing a band is the whole content of the claim — same top, no
+    horizontal overlap, and neither side wider than half. Asserted as an ordering rather
+    than as pixels so the theme's margins stay free to change.
+    """
+    slide = _slide("stack", [
+        Block(id="c", region="body", component="comparison", variant="split",
+              slots={"left": ["a", "b"], "right": ["c", "d"]}),
+    ])
+    left, right = expand.expand_slide(THEME, slide)
+    assert (left.slot, right.slot) == ("left", "right")
+    assert left.box.x + left.box.w <= right.box.x + 0.5, "sides overlap"
+    assert abs(left.box.y - right.box.y) < 0.5, "sides do not share a top"
+    assert abs(left.box.h - right.box.h) < 0.5, "sides are not the same height"
+    body = expand.region_box(THEME, registry.layout("stack").regions["body"])
+    assert left.box.w < body.w * 0.55, "a side is not half the block"
+
+
+def test_a_side_of_a_comparison_stacks_its_own_items() -> None:
+    """`per_row` arranges items within a slot, never the slots themselves.
+
+    With the sides side by side, a side that still flowed its items across two columns would
+    put half of one argument beside half of the other.
+    """
+    slide = _slide("stack", [
+        Block(id="c", region="body", component="comparison", variant="split",
+              slots={"left": ["a", "b"], "right": ["c", "d"]}),
+    ])
+    for side in expand.expand_slide(THEME, slide):
+        assert side.columns == 1
+        first, second = side.cells()
+        assert abs(first.x - second.x) < 0.5, "items are not in one column"
+
+
+def test_a_slot_that_declares_no_width_still_owns_its_row() -> None:
+    """Bands are backward compatible: default shares reproduce the stacked layout."""
+    slide = _slide("stack", [
+        Block(id="b", region="body", component="card_grid", variant="1x3",
+              slots={"title": "T", "items": ["a", "b", "c"]}),
+    ])
+    title, items = expand.expand_slide(THEME, slide)
+    assert title.box.y + title.box.h <= items.box.y + 0.5
+    assert abs(title.box.w - items.box.w) < 0.5
+
+
 def test_empty_slots_take_no_space(managed_slide: Slide) -> None:
     managed_slide.blocks[0].slots["title"] = ""
     slots = expand.expand_slide(THEME, managed_slide)
