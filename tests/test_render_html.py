@@ -18,7 +18,7 @@ import pytest
 
 from ppt_harness.core.session import Session
 from ppt_harness.render import browser, html
-from ppt_harness.state.document import Slide
+from ppt_harness.state.document import Block, Mode, Slide
 from ppt_harness.state.theme_default import default_theme
 
 THEME = default_theme()
@@ -68,6 +68,29 @@ def test_slot_geometry_matches_the_expander(managed_slide: Slide) -> None:
             continue
         assert f"left:{laid_out.box.x:.2f}px" in out.html
         assert f"width:{laid_out.box.w:.2f}px" in out.html
+
+
+def test_a_decorated_variant_draws_its_panel_where_the_expander_puts_it() -> None:
+    """The card is part of the file now, so it is part of the picture of the file.
+
+    A preview that drew `carded` as `flat` would put the divergence back where it started,
+    one layer down: the writer and the browser describing different slides. The pad is
+    spent as padding on the cell rather than on a smaller box, which `box-sizing: border-box`
+    makes the same content rectangle the writer measures against.
+    """
+    from ppt_harness.render.expand import expand_slide
+
+    slide = Slide(id="s_card", index=0, mode=Mode.MANAGED, layout="stack", blocks=[
+        Block(id="b", region="body", component="stat_row", variant="carded",
+              slots={"items": [{"value": "8.3%", "label": "Churn"},
+                               {"value": "+41%", "label": "Expansion"}]})])
+    out = html.render_slide(THEME, slide, CX, CY)
+    laid_out = next(s for s in expand_slide(THEME, slide) if s.slot == "items")
+
+    assert out.html.count('class="panel"') == 2, "a card behind each figure, or none at all"
+    for panel in laid_out.panels(2):
+        assert f"left:{panel.x:.2f}px" in out.html
+    assert f"padding:{laid_out.pad:.1f}px" in out.html
 
 
 def test_line_height_is_absolute_never_a_ratio(managed_slide: Slide) -> None:

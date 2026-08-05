@@ -8,6 +8,7 @@ gives tools a place to stand.
 from __future__ import annotations
 
 import base64
+import mimetypes
 import re
 import uuid
 from pathlib import Path
@@ -240,12 +241,26 @@ class Session:
 
         Needed wherever the HTML has to stand alone — the measurement pass loads it with
         `set_content`, so there is no origin for a relative URL to resolve against.
+
+        A key nothing is behind is tried as a path on disk, because the exporter does the
+        same (`io/media.resolve`) and a generated deck has no other way to name a picture:
+        nothing ingests bytes into the store, so a `media` slot on a deck the harness built
+        always names a file. Without this the preview would show a placeholder for a picture
+        the exported file actually has, and preview-equals-export is the invariant everything
+        else here is measured against.
         """
         found = self.assets.get(key)
-        if found is None:
+        if found is not None:
+            content_type, blob = found
+            return f"data:{content_type};base64,{base64.b64encode(blob).decode()}"
+
+        path = Path(key).expanduser() if key else None
+        if path is None or not path.is_file():
             return None
-        content_type, blob = found
-        return f"data:{content_type};base64,{base64.b64encode(blob).decode()}"
+        guessed, _ = mimetypes.guess_type(path.name)
+        blob = path.read_bytes()
+        return (f"data:{guessed or 'application/octet-stream'};base64,"
+                f"{base64.b64encode(blob).decode()}")
 
     def render_html(self, slide_id: str, *, inline_assets: bool = True,
                     asset_url: str = "/api/asset", for_display: bool = True) -> str:
@@ -262,7 +277,15 @@ class Session:
             src = self.asset_data_uri
         else:
             def src(key: str) -> str | None:
-                return f"{asset_url}/{key}" if key in self.assets else None
+                # A store asset gets the endpoint, which is the whole point of this branch.
+                # A `media` slot naming a *file* has nothing to serve — the endpoint reads
+                # `session.assets` — so it falls back to being inlined rather than being
+                # dropped: a picture the exported file has and the preview does not is the
+                # divergence this module exists to prevent, and it costs one image on a page
+                # that is otherwise still small.
+                if key in self.assets:
+                    return f"{asset_url}/{key}"
+                return self.asset_data_uri(key)
         return renderer.render_slide(self.theme, slide, cx, cy, asset_src=src,
                                      compensate_autofit=for_display).html
 
@@ -320,6 +343,12 @@ class Session:
                     width_px=b.width_px,
                     spec=b.spec,
                     stack=b.stack,
+                    # Every field of the budget travels, not just the ones this copy exists
+                    # to widen the context of. A rebuild that dropped `role` and `discount`
+                    # would leave `set_text` enforcing a discounted capacity while its
+                    # refusal explained none of it.
+                    role=b.role,
+                    discount=b.discount,
                     context={**b.context, "component": obj.component,
                              "variant": obj.variant, "region": obj.region},
                 )

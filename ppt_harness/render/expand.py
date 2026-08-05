@@ -16,7 +16,8 @@ import math
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..components import overrides, registry
+from ..components import decoration, overrides, registry
+from ..state import slots as slot_render
 from ..state.document import EMU_PER_INCH, Block, Slide, Theme, TypeSpec
 
 #: Vertical gap between a component's own slots, in px at 720p. Scaled with the canvas.
@@ -36,6 +37,48 @@ class Box:
     y: float
     w: float
     h: float
+
+    def inset(self, by: float) -> Box:
+        """The same rectangle, `by` px in from every edge. Negative grows it back out.
+
+        Clamped at one px rather than allowed to invert: a pad wider than the box it dresses
+        is a theme's spacing scale meeting a very small cell, and a negative width would
+        travel all the way to an EMU the file cannot hold.
+        """
+        if not by:
+            return self
+        return Box(x=self.x + by, y=self.y + by,
+                   w=max(1.0, self.w - 2 * by), h=max(1.0, self.h - 2 * by))
+
+    def scaled(self, by: float) -> Box:
+        """The same rectangle at `by` of its size, about its own centre.
+
+        Concentric rather than anchored at a corner, because the only caller is the
+        `media_scale` override and "fills 60% of its box" describes a smaller picture in the
+        same place, not one pushed into the top-left. Clamped to (0, 1] for the same reason
+        the override is: a factor above one is a picture leaving the box it was measured in.
+        """
+        by = max(0.01, min(1.0, by))
+        if by >= 1.0:
+            return self
+        w, h = self.w * by, self.h * by
+        return Box(x=self.x + (self.w - w) / 2, y=self.y + (self.h - h) / 2, w=w, h=h)
+
+    def fit(self, aspect: float) -> Box:
+        """The largest box of width/height `aspect` that fits inside this one, centred.
+
+        Letterboxing, and it is a decision rather than an obvious default — see
+        `io/media.py` for why the harness holds a picture's proportions instead of cropping
+        or stretching it. Expressed here because it is a coordinate, and DESIGN §1.4 says
+        this module is the only one that may produce one: the writer and `eject_slide` both
+        need the same rectangle, and two copies of this arithmetic is the shape of the bug
+        that makes an ejected slide stop matching the managed one it came from.
+        """
+        if aspect <= 0 or self.w <= 0 or self.h <= 0:
+            return self
+        w = min(self.w, self.h * aspect)
+        h = w / aspect
+        return Box(x=self.x + (self.w - w) / 2, y=self.y + (self.h - h) / 2, w=w, h=h)
 
     def emu(
         self, canvas_w: int, canvas_h: int, slide_cx: int, slide_cy: int
@@ -89,16 +132,20 @@ class LaidOutSlot:
     """
     cell_gap: float = 0.0
     """Gap between cells, in canvas px, already scaled to the canvas."""
+    decoration: str = ""
+    """What the variant draws behind this slot, resolved through the theme by the writer and
+    the preview. A name, so neither of them has to be told a colour."""
+    pad: float = 0.0
+    """Space the decoration takes out of the box, in canvas px.
 
-    def cells(self, count: int | None = None) -> list[Box]:
-        """The box each item occupies, row-major.
+    Applied once per *written* box, which is why a single-column slot arrives here already
+    deflated while a row of cells is deflated cell by cell in `cells`. Charging it per item
+    on a slot that renders as one frame would have the budget refuse content that fits, and
+    the whole point of applying padding in the expander is that the measurer and the writer
+    read the same number.
+    """
 
-        One entry per item, always — a single-column slot returns one box per item stacked
-        down the slot, which is the same geometry the renderer produced before `columns`
-        existed. Callers therefore do not branch: a plain list is the degenerate grid, not a
-        special case, and that is what keeps the budget's formula and the writer's loop
-        single-pathed.
-        """
+    def _grid(self, count: int | None = None) -> list[Box]:
         n = max(1, self.items if count is None else count)
         across = max(1, min(self.columns, n))
         down = math.ceil(n / across)
@@ -111,6 +158,49 @@ class LaidOutSlot:
             out.append(Box(x=self.box.x + column * (w + gap),
                            y=self.box.y + row * (h + gap), w=w, h=h))
         return out
+
+    def cells(self, count: int | None = None) -> list[Box]:
+        """The box each item's text occupies, row-major.
+
+        One entry per item, always — a single-column slot returns one box per item stacked
+        down the slot, which is the same geometry the renderer produced before `columns`
+        existed. Callers therefore do not branch: a plain list is the degenerate grid, not a
+        special case, and that is what keeps the budget's formula and the writer's loop
+        single-pathed.
+        """
+        pad = self.pad if self.columns > 1 else 0.0
+        return [box.inset(pad) for box in self._grid(count)]
+
+    def panels(self, count: int | None = None) -> list[Box]:
+        """The rectangle a decoration paints behind each written box.
+
+        One per cell across a row, and exactly one for a slot the writer emits as a single
+        frame — the count has to match the boxes, or a card ends up behind nothing. The
+        single case grows back out by the pad the expander already took off, so the text sits
+        inside its panel by the same margin the budget was charged.
+        """
+        if self.columns > 1:
+            return self._grid(count)
+        return [self.box.inset(-self.pad)]
+
+
+def written_cells(laid_out: LaidOutSlot, value: Any) -> list[tuple[str, Box]]:
+    """The text boxes one slot becomes, each with the text that goes in it.
+
+    Usually one, and one per item across a row. Single-column slots return the whole slot as
+    one frame, which is what the renderer produced before `columns` existed, so a plain list
+    is the degenerate grid rather than a branch anyone has to remember.
+
+    It lives beside the geometry, and not inside either writer, because there are two of
+    them: `export_mutate` writes a managed slide and `io/adopt.eject` freezes one. A slide
+    that ejected to a different arrangement from the one it exported would make the door out
+    of managed mode a reflow — and eject is one-way, so there would be nothing to compare it
+    against afterwards.
+    """
+    if laid_out.columns <= 1 or not isinstance(value, list):
+        return [(slot_render.slot_text(value), laid_out.box)]
+    parts = [slot_render.slot_text(item) for item in value]
+    return list(zip(parts, laid_out.cells(len(parts)), strict=False))
 
 
 def content_box(theme: Theme) -> Box:
@@ -176,6 +266,21 @@ def _bands(present: list[tuple[str, registry.SlotSpec]],
     return bands
 
 
+def _ordered(present: list[tuple[str, registry.SlotSpec]], order: tuple[str, ...],
+             ) -> list[tuple[str, registry.SlotSpec]]:
+    """The variant's slot order, where it states one.
+
+    Sorted stably against the declared order so a variant only has to name the slots it
+    moves. This is the whole of `image_right`: the two slots share a band, `_bands` builds
+    bands in declaration order, and which of them is drawn first is therefore the only thing
+    that decides which side the picture is on.
+    """
+    if not order:
+        return present
+    rank = {name: index for index, name in enumerate(order)}
+    return sorted(present, key=lambda item: rank.get(item[0], len(rank)))
+
+
 def expand_block(theme: Theme, block: Block, box: Box) -> list[LaidOutSlot]:
     """Divide one block's box among its slots by declared height share."""
     comp = registry.get(block.component)
@@ -193,7 +298,7 @@ def expand_block(theme: Theme, block: Block, box: Box) -> list[LaidOutSlot]:
     # disabled to prevent.
     gap *= overrides.gap_factor(block.overrides)
 
-    bands = _bands(present)
+    bands = _bands(_ordered(present, variant.slot_order))
     # A band is as tall as its tallest member, so two slots sharing a row cost the height of
     # one. Summing over bands rather than over slots is what reclaims the space the stacked
     # layout would have spent putting them under each other.
@@ -219,11 +324,17 @@ def expand_block(theme: Theme, block: Block, box: Box) -> list[LaidOutSlot]:
             # Only a list is arranged; a title with `per_row` on its variant is still one box.
             # Reading the variant's number for a `prose` slot would silently halve its width.
             across = variant.per_row if spec.shape == "list" else 1
+            pad = decoration.pad_for(theme, variant.decoration, spec.shape)
+            # A slot the writer emits as one frame is deflated here, so the box every
+            # downstream reader sees — the budget, the preview, the frozen geometry — is the
+            # box the text lands in. A row of cells keeps its outer box and is deflated cell
+            # by cell instead, because there the decoration is drawn once per cell.
+            slot_box = Box(x=x, y=y, w=w, h=h)
             out.append(
                 LaidOutSlot(
                     block_id=block.id,
                     slot=name,
-                    box=Box(x=x, y=y, w=w, h=h),
+                    box=slot_box if across > 1 else slot_box.inset(pad),
                     spec=theme.type.scale[spec.role],
                     role=spec.role,
                     align=overrides.OVERRIDES["align"].clamp(
@@ -235,6 +346,8 @@ def expand_block(theme: Theme, block: Block, box: Box) -> list[LaidOutSlot]:
                     overrides=overrides.clamp_all(block.overrides),
                     columns=max(1, across),
                     cell_gap=CELL_GAP * scale,
+                    decoration=variant.decoration,
+                    pad=pad,
                 )
             )
             x += w + inner_gap

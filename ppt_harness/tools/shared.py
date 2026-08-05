@@ -235,7 +235,8 @@ def review_deck(session: Session, slide_id: str | None = None,
       obj({"path": string("Destination path"),
            "mode": string("Export mode", ["editable", "pixel_locked"])}, ["path"]))
 def export(session: Session, path: str, mode: str = "editable") -> dict[str, Any]:
-    report = export_mutate.export(session.deck, path, mode=mode, strict=False)  # type: ignore[arg-type]
+    report = export_mutate.export(session.deck, path, mode=mode, strict=False,  # type: ignore[arg-type]
+                                  assets=session.assets)
     return {
         "ok": report.ok,
         "path": str(report.path),
@@ -269,7 +270,7 @@ def eject_slide(session: Session, slide_id: str,
         raise ToolError("wrong_mode", f"{slide_id} is already freeform")
 
     cx, cy = session.slide_size_emu()
-    shapes = adoption.eject(slide, session.theme, cx, cy)
+    shapes = adoption.eject(slide, session.theme, cx, cy, session.assets)
     if not shapes:
         raise ToolError("nothing_to_eject", f"{slide_id} has no filled slots")
 

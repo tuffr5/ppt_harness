@@ -22,8 +22,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..components import registry
-from ..state.document import Block, Mode, Shape, Slide, Theme
+from ..components import decoration, overrides, registry
+from ..state.document import Block, Geometry, Mode, Shape, Slide, Theme
 
 #: Below this, the classifier says it does not know rather than guessing.
 MIN_CONFIDENCE = 0.55
@@ -51,15 +51,26 @@ class Guess:
 # ------------------------------------------------------------------------ eject
 
 
-def eject(slide: Slide, theme: Theme, cx: int, cy: int) -> list[Shape]:
+def eject(slide: Slide, theme: Theme, cx: int, cy: int,
+          assets: dict[str, tuple[str, bytes]] | None = None) -> list[Shape]:
     """Freeze a managed slide's blocks into absolute shapes.
 
     Lossless by construction: the expander already decides every box, so this writes down
     what it decided. What is lost is the *ability to re-derive* it — which is exactly what
     makes the door one-way.
+
+    "Lossless" has to mean everything the slide *drew*, not everything it said. This used to
+    freeze text and only text, so ejecting a slide built from a decorated variant — `carded`,
+    `zebra`, `table` — silently dropped its panels, and ejecting an `image_full` or
+    `image_split` slide dropped the picture the slide was about. Both are one-way losses: the
+    blocks are gone by the time anyone notices, and there is nothing left to re-derive them
+    from. A door that quietly costs you the cards is a door people stop trusting.
+
+    Emitted in the order the writer writes: the panel, then the picture or the words in front
+    of it. `spTree` is painted in document order, so a card frozen after its text would cover
+    the words it is behind.
     """
     from ..render import expand
-    from ..state import slots as slot_render
 
     canvas_w, canvas_h = theme.grid.canvas
     frozen: list[Shape] = []
@@ -71,18 +82,95 @@ def eject(slide: Slide, theme: Theme, cx: int, cy: int) -> list[Shape]:
         value = block.slots.get(laid_out.slot)
         if not value:
             continue
-        x, y, w, h = laid_out.box.emu(canvas_w, canvas_h, cx, cy)
-        frozen.append(Shape(
-            id=f"{laid_out.block_id}_{laid_out.slot}",
-            ooxml_id=0,
-            type="text_box",
-            frame={"x": x, "y": y, "cx": w, "cy": h},
-            role=laid_out.role,
-            text=slot_render.slot_text(value),
-            align=laid_out.align,
-            type_spec=laid_out.spec,
-        ))
+
+        if laid_out.shape == "media":
+            frozen.extend(_frozen_picture(laid_out, value, theme, cx, cy, assets))
+            continue
+
+        # The same cells the writer emits, from the same function, because a slide that
+        # ejected to a different arrangement from the one it exports would make this door a
+        # reflow rather than a freeze.
+        cells = expand.written_cells(laid_out, value)
+        panels = laid_out.panels(len(cells))
+        paint = decoration.paint_for(theme, laid_out.decoration, laid_out.shape)
+        for index, ((text, cell), panel) in enumerate(zip(cells, panels, strict=True)):
+            if not text:
+                continue
+            name = f"{laid_out.block_id}_{laid_out.slot}"
+            if len(cells) > 1:
+                name = f"{name}_{index}"
+            if paint.visible:
+                frozen.append(_frozen_panel(panel, paint, theme, canvas_w, canvas_h,
+                                            cx, cy, name))
+            x, y, w, h = cell.emu(canvas_w, canvas_h, cx, cy)
+            frozen.append(Shape(
+                id=name,
+                ooxml_id=0,
+                type="text_box",
+                frame={"x": x, "y": y, "cx": w, "cy": h},
+                role=laid_out.role,
+                text=text,
+                align=laid_out.align,
+                type_spec=laid_out.spec,
+            ))
     return frozen
+
+
+def _frozen_panel(panel, paint: decoration.Paint, theme: Theme, canvas_w: int,
+                  canvas_h: int, cx: int, cy: int, name: str) -> Shape:
+    """One decoration panel as a real autoshape.
+
+    A `Geometry`, which is the model's word for "a shape that is drawn" — so the frozen panel
+    is the same kind of thing an imported autoshape is, and the preview and the writer that
+    already handle those need nothing new. Frozen rather than refused: the alternative is
+    telling a model that used `carded` that it may not leave managed mode, and the pressure
+    valve exists precisely so that answer is never necessary.
+    """
+    x, y, w, h = panel.emu(canvas_w, canvas_h, cx, cy)
+    return Shape(
+        id=f"{name}_panel",
+        ooxml_id=0,
+        type="shape",
+        frame={"x": x, "y": y, "cx": w, "cy": h},
+        geometry=Geometry(preset="roundRect", fill=paint.fill or None,
+                          line=paint.line or None,
+                          line_width_pt=decoration.LINE_PX * 0.75),
+    )
+
+
+def _frozen_picture(laid_out, value, theme: Theme, cx: int, cy: int,
+                    assets: dict[str, tuple[str, bytes]] | None) -> list[Shape]:
+    """A `media` slot as a real picture shape, in the rectangle the writer would have used.
+
+    The frame carries the picture's own proportions — `Box.fit`, the same call the writer
+    makes — so the frozen shape is stretched into a rectangle that already fits it and the
+    ejected slide is pixel-for-pixel the managed one. An asset nothing is behind freezes
+    nothing: there is no picture to lose, and inventing a placeholder would put a shape on
+    the slide that the managed version never had.
+    """
+    from . import media as media_mod
+
+    found = media_mod.payload(value)
+    if found is None:
+        return []
+    asset_id, alt = found
+    asset = media_mod.resolve(asset_id, assets)
+    if asset is None:
+        return []
+
+    placed = (laid_out.box
+              .scaled(overrides.media_factor(laid_out.overrides))
+              .fit(asset.aspect))
+    x, y, w, h = placed.emu(*theme.grid.canvas, cx, cy)
+    return [Shape(
+        id=f"{laid_out.block_id}_{laid_out.slot}",
+        ooxml_id=0,
+        type="picture",
+        frame={"x": x, "y": y, "cx": w, "cy": h},
+        asset=asset_id,
+        alt=alt,
+        source=asset.path,
+    )]
 
 
 # -------------------------------------------------------------------- classifier

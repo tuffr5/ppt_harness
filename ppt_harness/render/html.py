@@ -29,12 +29,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from ..components import overrides
+from ..components import decoration, overrides
 from ..state import richtext
 from ..state.document import Mode, Slide, Theme
 from ..state.slots import STAT_LABEL_EM, is_stat
 from . import svg
-from .expand import LaidOutSlot, expand_slide
+from .expand import Box, LaidOutSlot, expand_slide
 
 #: Slot elements carry this so the measurement pass can find them without guessing.
 PROBE_ATTR = "data-target"
@@ -156,6 +156,10 @@ html, body {{ margin: 0; padding: 0; background: #6b7280; }}
   word-break: normal;
 }}
 .slot.overflowing {{ outline: 2px solid #dc2626; outline-offset: 2px; }}
+/* The panel a decorated variant draws — `stat_row/carded`, `comparison/table`. Behind the
+   words rather than part of them, so it is never probed: the measured element is still the
+   slot's text, and the box it is drawn in is the one the exporter paints. */
+.panel {{ position: absolute; }}
 /* A stat is a figure with its subject written under it. The label is set small and quiet but
    keeps a full line box, so what the browser lays out and what the analytic pass counts stay
    the same number of lines. */
@@ -194,6 +198,21 @@ html, body {{ margin: 0; padding: 0; background: #6b7280; }}
      from the one the file actually has. */
   width: 100%; height: 100%; object-fit: fill; display: block;
 }}
+/* A managed `media` slot. `contain` rather than `fill`, and it is the writer's rule rather
+   than a second one: the exporter letterboxes the picture inside this box with `Box.fit`,
+   and `contain` *is* that rectangle — the largest box of the image's own proportions,
+   centred. The div is already the slot box shrunk by `media_scale`, so preview and file
+   agree without the preview ever decoding the image to find out how wide it is. */
+.media {{ position: absolute; }}
+.media img {{ width: 100%; height: 100%; object-fit: contain; display: block; }}
+/* An `asset_id` with nothing behind it. Named rather than blank, for the same reason an
+   opaque shape is: the slot is filled, and a preview that drew nothing would look exactly
+   like a slot nobody filled — which is the silence the export report exists to break. */
+.media.missing {{
+  border: 1px dashed rgba(0,0,0,.28); background: rgba(0,0,0,.04);
+  display: flex; align-items: center; justify-content: center; text-align: center;
+  font: 500 12px/1.3 ui-sans-serif, system-ui, sans-serif; color: rgba(0,0,0,.45);
+}}
 """.strip()
 
 
@@ -220,13 +239,57 @@ def _slot_style(theme: Theme, laid_out: LaidOutSlot) -> str:
 # ---------------------------------------------------------------------- managed
 
 
-def _managed_body(theme: Theme, slide: Slide) -> tuple[str, list[str]]:
+def _panel_html(box: Box, paint: decoration.Paint) -> str:
+    """One decoration panel, in the box the writer paints the same rectangle in.
+
+    `box-sizing: border-box` is what makes the border legitimate here: it is drawn inside the
+    rectangle, so a card in the preview covers exactly the pixels the exported autoshape
+    does rather than a hairline more.
+    """
+    fill = f"background:{paint.fill};" if paint.fill else ""
+    edge = f"border:{decoration.LINE_PX}px solid {paint.line};" if paint.line else ""
+    return (f'<div class="panel" style="left:{box.x:.2f}px; top:{box.y:.2f}px; '
+            f'width:{box.w:.2f}px; height:{box.h:.2f}px; {fill}{edge}'
+            f'border-radius:{paint.radius:.0f}px"></div>')
+
+
+def _media_html(laid_out: LaidOutSlot, value: Any, src: str | None) -> str:
+    """A managed `media` slot as the picture the exporter writes there.
+
+    The box is the slot's, shrunk by `media_scale` about its centre — the same
+    `Box.scaled` the writer calls — and the picture is letterboxed inside it by the
+    stylesheet. The preview is the file rendered, and a media slot the preview left blank is
+    how `image_full/bleed` and `image_full/inset` came to look identical in *both*.
+    """
+    box = laid_out.box.scaled(overrides.media_factor(laid_out.overrides))
+    geom = (f'left:{box.x:.2f}px; top:{box.y:.2f}px; '
+            f'width:{box.w:.2f}px; height:{box.h:.2f}px')
+    alt = _esc(str(value.get("alt") or "") if isinstance(value, dict) else "")
+    if not src:
+        name = _esc(str(value.get("asset_id") or "") if isinstance(value, dict) else "")
+        return f'<div class="media missing" style="{geom}">{name or "image"}</div>'
+    return f'<div class="media" style="{geom}"><img src="{_esc(src)}" alt="{alt}"></div>'
+
+
+def _managed_body(theme: Theme, slide: Slide,
+                  asset_src: AssetSrc | None = None) -> tuple[str, list[str]]:
     parts, targets = [], []
     for laid_out in expand_slide(theme, slide):
         block = slide.block(laid_out.block_id)
         if block is None:
             continue
         value = block.slots.get(laid_out.slot)
+
+        # Before the text check, because a picture has no text and would fall out of the
+        # loop there. It is also not a probe: the measurement contract is about words
+        # overflowing a box, and a slot whose content is an image has none to overflow.
+        if laid_out.shape == "media":
+            if value:
+                key = str(value.get("asset_id") or "") if isinstance(value, dict) else ""
+                parts.append(_media_html(laid_out, value,
+                                         asset_src(key) if asset_src and key else None))
+            continue
+
         accent = overrides.accent_for(theme, laid_out.overrides)
         content = _text_html(value, accent)
         if not content:
@@ -239,8 +302,20 @@ def _managed_body(theme: Theme, slide: Slide) -> tuple[str, list[str]]:
         # stays the slot's box, and the cells live inside it as a grid. The alternative,
         # a probe per cell, would have made every target in the deck ambiguous to buy a
         # geometry the budget already computes analytically.
-        if laid_out.columns > 1 and isinstance(value, list) and len(value) > 1:
-            cells = "".join(f'<span class="cell">{_item_html(item, accent)}</span>'
+        grid = laid_out.columns > 1 and isinstance(value, list) and len(value) > 1
+        # Same count the writer emits, and drawn before the slot so document order puts it
+        # behind — the preview is the file rendered, down to the z-order.
+        paint = decoration.paint_for(theme, laid_out.decoration, laid_out.shape)
+        if paint.visible:
+            for panel in laid_out.panels(len(value) if grid else 1):
+                parts.append(_panel_html(panel, paint))
+
+        if grid:
+            # The pad is the writer's inset, spent as padding rather than as a smaller box:
+            # `box-sizing: border-box` makes the two the same content rectangle, and the
+            # grid track stays the cell the exporter paints its card in.
+            style = f' style="padding:{laid_out.pad:.1f}px"' if laid_out.pad else ""
+            cells = "".join(f'<span class="cell"{style}>{_item_html(item, accent)}</span>'
                             for item in value)
             inner = (f'<span class="ink grid" style="'
                      f'display:grid;'
@@ -389,7 +464,7 @@ def render_slide(theme: Theme, slide: Slide, cx: int, cy: int,
     overflow it reports is the real one.
     """
     if slide.mode is Mode.MANAGED:
-        body, targets = _managed_body(theme, slide)
+        body, targets = _managed_body(theme, slide, asset_src)
     else:
         body, targets = _freeform_body(theme, slide, cx, cy, asset_src, compensate_autofit)
 

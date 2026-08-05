@@ -30,6 +30,41 @@ def _require_managed(session: Session, slide_id: str) -> Slide:
     return slide
 
 
+def _check_media(component: str, slots: dict[str, Any]) -> None:
+    """A `media` slot names a picture and describes it. Both, or the write is refused.
+
+    Refused here rather than reported at export for the reason `add_slide` budgets before it
+    writes: a rejected write is the cheapest possible failure, and the alternative is a model
+    told `ok` and a slide whose picture turns up missing in the exported file.
+
+    Alt text is required for the same reason `add_image` has required it since it shipped —
+    a deck that cannot be read aloud is a deck part of the audience cannot use — and the
+    managed path is not a loophole in that. Whether the asset actually resolves is *not*
+    checked: nothing here can see the deck's assets, and a name that turns out to be behind
+    nothing is reported by the exporter as `slot_not_written`, which is where the writer
+    already says what it could not build.
+    """
+    comp = registry.get(component)
+    for name, value in slots.items():
+        spec = comp.slots.get(name)
+        if spec is None or spec.shape != "media" or not value:
+            continue
+        payload = value if isinstance(value, dict) else {}
+        if not str(payload.get("asset_id") or "").strip():
+            raise ToolError(
+                "media_needs_asset",
+                f"{component}.{name} is a picture slot; it takes "
+                '{"asset_id": ..., "alt": ...}, where asset_id names an image in the deck '
+                "or a path to one",
+            )
+        if not str(payload.get("alt") or "").strip():
+            raise ToolError(
+                "alt_required",
+                f"{component}.{name} needs alt text: a picture with none is invisible to "
+                "anyone using a screen reader",
+            )
+
+
 def _check_block(session: Session, slide: Slide, block: Block) -> list[str]:
     """Budget every filled slot of a block. Returns human-readable failures."""
     from ..render import expand
@@ -110,6 +145,7 @@ def add_slide(
         missing = [n for n, s in comp.slots.items() if s.required and not spec["slots"].get(n)]
         if missing:
             raise ToolError("missing_slot", f"{key} requires {missing}")
+        _check_media(key, spec["slots"])
         built.append(Block(id=session.new_id("bk"), region=region, component=key,
                            variant=variant, slots=spec["slots"]))
 
@@ -229,6 +265,7 @@ def set_slots(session: Session, slide_id: str, block_id: str, patch: dict[str, A
     if unknown:
         raise ToolError("unknown_slot",
                         f"{block.component} has no slot(s) {sorted(unknown)}")
+    _check_media(block.component, patch)
 
     before = dict(block.slots)
     trial = Block(id=block.id, region=block.region, component=block.component,

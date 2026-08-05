@@ -15,11 +15,11 @@ def default_theme() -> Theme:
         palette={
             "bg": "#FFFFFF",
             "surface": "#F5F7FA",
-            #: Reserved, and honestly labelled as such: paired with `shape.rule_weight`,
-            #: these describe a divider line that no component currently draws. Kept
-            #: rather than deleted because a theme is a contract — a deck extracted today
-            #: should still resolve against a catalog that grows a divider tomorrow — but
-            #: nothing reads either token, so neither is load-bearing yet.
+            #: The hairline a decorated variant outlines its panels with — `carded`,
+            #: `table` — resolved through `components.decoration`. Still reserved as the
+            #: divider colour its name implies, paired with `shape.rule_weight`: no
+            #: component draws a divider yet, and a theme is a contract, so the token stays
+            #: whether or not today's catalog has somewhere to put it.
             "rule": "#DCE1E8",
             "ink": "#12161C",
             "ink_muted": "#5A6472",
@@ -48,7 +48,11 @@ def default_theme() -> Theme:
         ),
         grid=Grid(canvas=(1280, 720), margin=72, columns=12, gutter=20, baseline=4),
         spacing=[4, 8, 12, 16, 24, 32, 48, 64],
-        shape={"radius": 3, "rule_weight": 4, "card_fill": "none", "shadow": "none"},
+        # `card_fill` names the palette *role* a decorated panel is filled with, not a
+        # colour — `surface`, whose contrast against `ink` is one of the pairs validated at
+        # load, so a card cannot be a slide that fails contrast. `"none"` is the other legal
+        # answer and means outline-only, which still distinguishes `carded` from `flat`.
+        shape={"radius": 3, "rule_weight": 4, "card_fill": "surface", "shadow": "none"},
         layouts=["title", "stack", "two_col", "hero_plus_row", "full_bleed"],
     )
 

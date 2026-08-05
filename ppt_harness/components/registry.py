@@ -61,6 +61,18 @@ class Variant:
     per_row: int = 1
     align: Literal["left", "center"] = "left"
     overrides: dict[str, Any] = field(default_factory=dict)
+    #: What this variant draws around its content, from `components.decoration`. A *name*,
+    #: never a colour or a length: the theme decides what a card is filled with, and a hex
+    #: value here would be the catalog answering a question that is not its to answer.
+    decoration: str = ""
+    slot_order: tuple[str, ...] = ()
+    """Slots laid out in this order rather than in the component's declared one.
+
+    Adjacency is declaration order — `_bands` groups consecutive slots — so for two slots
+    sharing a band this is the *only* thing that can distinguish `image_left` from
+    `image_right`. Slots the variant does not name follow the ones it does, in their
+    declared order.
+    """
 
 
 @dataclass(frozen=True)
@@ -206,7 +218,10 @@ COMPONENTS: dict[str, Component] = {
         },
         variants={
             "flat": Variant("flat", per_row=4, align="center"),
-            "carded": Variant("carded", per_row=4, align="center"),
+            # The one thing "carded" can mean: a panel behind each figure. Without it the
+            # variant was a synonym for `flat` — same columns, same alignment, same boxes —
+            # and the catalog was offering a rendering the writer never drew.
+            "carded": Variant("carded", per_row=4, align="center", decoration="card"),
             "two_row": Variant("two_row", per_row=2, align="center"),
         },
     ),
@@ -221,6 +236,11 @@ COMPONENTS: dict[str, Component] = {
             "items": SlotSpec("list", role="body", max_items=6, max_lines=3,
                               height_share=0.82),
         },
+        # `1x3` and `2x3` are deliberately the same geometry. A grid variant owns its
+        # columns; the rows are a function of how many items it is given, and a second row
+        # that appeared because six items were passed is the same second row `2x3` names.
+        # Capping `1x3` at three would refuse content over a difference the reader cannot
+        # see, so the two names describe the same rule at two intended item counts.
         variants={
             "1x3": Variant("1x3", per_row=3),
             "2x2": Variant("2x2", per_row=2),
@@ -278,9 +298,13 @@ COMPONENTS: dict[str, Component] = {
         # `per_row=2` arranged the items *within* a side, which flowed one list across two
         # columns and then the other beneath it — ten cells in reading order, and no
         # comparison anywhere on the slide.
+        # `table` puts each side in a panel, so the two read as the cells of one table rather
+        # than as two lists that happen to be adjacent; `split` lets the whitespace do it.
+        # Nothing else can separate them — the sides hold the same slots at the same size in
+        # the same boxes, so no content a caller could pass would tell the two apart.
         variants={
             "split": Variant("split", per_row=1),
-            "table": Variant("table", per_row=1),
+            "table": Variant("table", per_row=1, decoration="card"),
         },
     ),
     "data_table": Component(
@@ -296,7 +320,10 @@ COMPONENTS: dict[str, Component] = {
             "prose": SlotSpec("prose", role="caption", required=False, max_lines=2,
                               height_share=0.18),
         },
-        variants={"plain": Variant("plain"), "zebra": Variant("zebra")},
+        # `plain` states no banding rather than leaving it unsaid: a table inherits `bandRow`
+        # from whatever style the package carries, so the difference between these two was
+        # decided by the recipient's template and not by the variant.
+        variants={"plain": Variant("plain"), "zebra": Variant("zebra", decoration="banded")},
     ),
     "chart": Component(
         key="chart",
@@ -323,7 +350,10 @@ COMPONENTS: dict[str, Component] = {
             "prose": SlotSpec("prose", role="caption", required=False, max_lines=2,
                               height_share=0.14),
         },
-        variants={"bleed": Variant("bleed"), "inset": Variant("inset")},
+        # A margin, which is what the two words mean: `bleed` gives the picture its whole
+        # region, `inset` holds it off the edges. Neither draws anything — a border here
+        # would be the variant restyling the image rather than framing it.
+        variants={"bleed": Variant("bleed"), "inset": Variant("inset", decoration="inset")},
     ),
     "image_split": Component(
         key="image_split",
@@ -332,15 +362,20 @@ COMPONENTS: dict[str, Component] = {
         # Terminal: `bullets` has nowhere to put the picture. When this will not fit, the
         # honest answer is to split the slide, which the repair ladder says out loud.
         degrades_to=None,
+        # Half-width shares, so the picture and the words share a band. Stacked they were a
+        # picture *above* the point it was making, and the variants said `per_row=2` — which
+        # arranges the items inside a list slot and can never move one slot beside another,
+        # so it did nothing here at all.
         slots={
             "title": SlotSpec("title", role="block_title", required=False, max_lines=2,
                               height_share=0.2),
-            "media": SlotSpec("media", role="caption", height_share=0.52),
-            "prose": SlotSpec("prose", role="body", max_lines=4, height_share=0.28),
+            "media": SlotSpec("media", role="caption", height_share=0.8, width_share=0.5),
+            "prose": SlotSpec("prose", role="body", max_lines=4, height_share=0.8,
+                              width_share=0.5),
         },
         variants={
-            "image_left": Variant("image_left", per_row=2),
-            "image_right": Variant("image_right", per_row=2),
+            "image_left": Variant("image_left"),
+            "image_right": Variant("image_right", slot_order=("title", "prose", "media")),
         },
     ),
     "quote": Component(
@@ -467,7 +502,12 @@ def describe(key: str) -> dict[str, Any]:
         "purpose": comp.purpose,
         "regions": list(comp.regions),
         "variants": {
-            name: {"columns": v.columns, "per_row": v.per_row, "align": v.align}
+            # `decoration` is reported because it is the only difference between several of
+            # these pairs, and a model choosing between `flat` and `carded` on the strength
+            # of `columns`, `per_row` and `align` alone is choosing between two identical
+            # descriptions.
+            name: {"columns": v.columns, "per_row": v.per_row, "align": v.align,
+                   "decoration": v.decoration}
             for name, v in comp.variants.items()
         },
         "slots": {

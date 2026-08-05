@@ -174,7 +174,8 @@ class PreviewCache:
             # `strict=False`: a preview must render even when the deck has a fidelity
             # problem. Refusing to draw the thing the user is trying to look at would hide
             # the very slide they need to see.
-            export(self.session.deck, scratch, strict=False)
+            export(self.session.deck, scratch, strict=False,
+                   assets=self.session.assets)
             scratch.replace(deck_path)
         finally:
             scratch.unlink(missing_ok=True)

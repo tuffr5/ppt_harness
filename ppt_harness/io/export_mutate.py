@@ -23,12 +23,19 @@ from typing import Any, Literal
 from pptx import Presentation
 from pptx.util import Emu, Pt
 
+from ..components import decoration as decoration_mod
 from ..components import overrides as overrides_mod
 from ..render import expand
 from ..state import richtext, slots
 from ..state.document import ChartSpec, Deck, Frame, Mode, Shape, Slide, TableSpec
 from . import embed_fonts
+from . import media as media_mod
 from . import writer_assertions as fidelity
+
+#: The deck's pictures, keyed the way `media` slots and imported shapes name them:
+#: `{asset_id: (content_type, bytes)}`. Threaded in from the session rather than read off the
+#: deck because assets are deliberately not part of the document model — see `DeckStore`.
+Assets = dict[str, tuple[str, bytes]]
 
 ExportMode = Literal["editable", "pixel_locked"]
 
@@ -148,23 +155,53 @@ def _patch_freeform(slide, index: int, model: Slide, written: set[tuple[int, int
     return patched
 
 
-def _write_ejected(prs, model: Slide, deck: Deck, written: set[tuple[int, int]]) -> int:
+def _write_ejected(prs, model: Slide, deck: Deck, written: set[tuple[int, int]],
+                   assets: Assets | None = None) -> int:
     """Write a freeform slide that has no original — the output of `eject_slide`.
 
     The geometry is already absolute: ejection is the expander's answer written down, so this
-    places each shape where the model says and does not re-derive anything. Text only, which
-    is what ejection produces today; anything else is left for the writer that understands it
-    rather than approximated here.
+    places each shape where the model says and does not re-derive anything.
+
+    Three kinds of shape, in document order, because that *is* the z-order: a decoration
+    panel, a picture, or text. Panels and pictures used to be skipped here, which made
+    ejecting a `carded` or `image_full` slide a silent demolition — the cards and the
+    photograph were simply not in the file, and eject is one-way, so there was nothing to go
+    back to. Everything the expander drew has to survive the freeze or the door out of
+    managed mode costs more than the catalog it escapes.
     """
     from pptx.util import Emu as _Emu
 
+    theme = deck.theme
     blank = _blank_layout(prs)
     slide = prs.slides.add_slide(blank)
     slide_index = len(prs.slides._sldIdLst) - 1
     added = 0
+    emu_per_px = int(prs.slide_width) / max(1, theme.grid.canvas[0])
 
     for shape in model.shapes:
-        if shape.opaque or not (shape.text or "").strip():
+        if shape.opaque:
+            continue
+
+        if shape.geometry is not None and shape.geometry.visible:
+            f = shape.frame
+            paint = decoration_mod.Paint(fill=shape.geometry.fill or "",
+                                         line=shape.geometry.line or "",
+                                         radius=float(theme.shape.get("radius") or 0.0))
+            _paint_panel(slide, (f.x, f.y, f.cx, f.cy), paint,
+                         f"{model.id}:{shape.id}", emu_per_px)
+            added += 1
+            continue
+
+        if shape.asset or shape.source:
+            # The frame already has the picture's proportions — `eject_slide` asked
+            # `Box.fit` the same question the writer does — so this stretches into it and
+            # the result is the rectangle the managed slide had.
+            asset = media_mod.resolve(shape.asset or shape.source or "", assets)
+            if asset is not None and _add_picture(slide, shape, image=asset.image()):
+                added += 1
+            continue
+
+        if not (shape.text or "").strip():
             continue
         frame = shape.frame
         box = slide.shapes.add_textbox(_Emu(frame.x), _Emu(frame.y),
@@ -185,7 +222,8 @@ def _write_ejected(prs, model: Slide, deck: Deck, written: set[tuple[int, int]])
 
 
 def _write_managed(prs, model: Slide, deck: Deck, written: set[tuple[int, int]],
-                   dropped: list[fidelity.Violation] | None = None) -> int:
+                   dropped: list[fidelity.Violation] | None = None,
+                   assets: Assets | None = None) -> int:
     """Render a managed slide into real placeholders and text boxes.
 
     Geometry comes from the expander and nowhere else, and it is written as absolute boxes
@@ -211,11 +249,13 @@ def _write_managed(prs, model: Slide, deck: Deck, written: set[tuple[int, int]],
         x, y, w, h = laid_out.box.emu(canvas_w, canvas_h, cx, cy)
         name = f"{model.id}:{laid_out.block_id}:{laid_out.slot}"
 
-        # A `tabular` or `chart` slot is written as the thing it is — the same structures
-        # `add_table` and `add_chart` produce — so a deck the harness generates is one it
-        # can read back and keep editing. Writing them as text put a Python dict on a slide.
+        # A `tabular`, `chart` or `media` slot is written as the thing it is — the same
+        # structures `add_table`, `add_chart` and `add_image` produce — so a deck the harness
+        # generates is one it can read back and keep editing. Writing them as text put a
+        # Python dict on a slide.
         if not _is_text_slot(laid_out):
-            shape_id = _write_object(slide, laid_out, value, name, (x, y, w, h))
+            shape_id = _write_object(slide, laid_out, value, name, (x, y, w, h), theme,
+                                     assets, (cx, cy))
             if shape_id is not None:
                 added += 1
             elif dropped is not None:
@@ -237,14 +277,24 @@ def _write_managed(prs, model: Slide, deck: Deck, written: set[tuple[int, int]],
         # came back through the preview (the preview is the export, rendered) and made every
         # `stat_row`, `card_grid`, `icon_row` and horizontal `timeline` in the catalog look
         # identical to `bullets`.
-        for index, (part, cell) in enumerate(_cells_of(laid_out, value)):
+        written_cells = expand.written_cells(laid_out, value)
+        # One panel per written box, and drawn before it: `spTree` is painted in document
+        # order, so a card added after its text would cover the words it is behind.
+        panels = laid_out.panels(len(written_cells))
+        paint = decoration_mod.paint_for(theme, laid_out.decoration, laid_out.shape)
+        for index, ((part, cell), panel) in enumerate(zip(written_cells, panels,
+                                                          strict=True)):
             runs = richtext.parse(part)
             text = richtext.to_plain(runs)
             if not text:
                 continue
+            cell_name = name if laid_out.columns == 1 else f"{name}#{index}"
+            if paint.visible:
+                _paint_panel(slide, panel.emu(canvas_w, canvas_h, cx, cy), paint,
+                             f"{cell_name}.panel", cx / canvas_w)
             cx_, cy_, cw, ch = cell.emu(canvas_w, canvas_h, cx, cy)
             box = slide.shapes.add_textbox(Emu(cx_), Emu(cy_), Emu(cw), Emu(ch))
-            box.name = name if laid_out.columns == 1 else f"{name}#{index}"
+            box.name = cell_name
 
             frame = box.text_frame
             _write_runs(frame, runs, text)
@@ -352,24 +402,40 @@ def _add_shape(slide, shape_model, model, index: int) -> int | None:
     return _add_textbox(slide, shape_model, model, index)
 
 
-def _add_picture(slide, shape_model) -> int | None:
+def _add_picture(slide, shape_model, image: Any = None) -> int | None:
     """A picture, with its alt text.
 
     `descr` is where PowerPoint keeps alternative text, and it is the only part of a picture
     that a screen reader can use.
+
+    `image` is anything python-pptx opens — a path or a stream — and defaults to the shape's
+    `source`, which is what `add_image` recorded. A managed `media` slot passes a stream
+    instead, because its picture lives in the deck's assets and has no path on this machine.
+
+    The frame is written verbatim: the picture is stretched into exactly the rectangle it is
+    given. Every caller therefore owns the aspect ratio, and both of the harness's own
+    callers hand over a rectangle `Box.fit` already gave the image's own proportions.
     """
     from pptx.util import Emu
 
     f = shape_model.frame
-    picture = slide.shapes.add_picture(shape_model.source, Emu(f.x), Emu(f.y),
-                                       Emu(f.cx), Emu(f.cy))
+    picture = slide.shapes.add_picture(image if image is not None else shape_model.source,
+                                       Emu(f.x), Emu(f.y), Emu(f.cx), Emu(f.cy))
     if shape_model.alt:
         picture._element._nvXxPr.cNvPr.set("descr", shape_model.alt)
     return int(picture.shape_id)
 
 
-def _add_table(slide, shape_model) -> int | None:
-    """A real `<a:tbl>`, so the recipient can edit cells rather than a picture of them."""
+def _add_table(slide, shape_model, band: str | None = None) -> int | None:
+    """A real `<a:tbl>`, so the recipient can edit cells rather than a picture of them.
+
+    `band` is the colour alternate rows are filled with, or None for a table that states it
+    has no banding. Stated either way: `bandRow` is inherited from whatever table style the
+    package carries, so leaving it unsaid made `plain` and `zebra` the same table wearing the
+    recipient's template. The fill is written onto the cells rather than left to the style
+    for the same reason — a style the harness did not author is not a decision it can rely on.
+    """
+    from pptx.dml.color import RGBColor
     from pptx.util import Emu, Pt
 
     spec = shape_model.table
@@ -379,11 +445,18 @@ def _add_table(slide, shape_model) -> int | None:
                                      Emu(f.x), Emu(f.y), Emu(f.cx), Emu(f.cy))
     table = graphic.table
     table.first_row = bool(spec.headers)
+    table.horz_banding = band is not None
 
+    head = 1 if spec.headers else 0
     for r, line in enumerate(grid):
         for c in range(spec.columns):
             cell = table.cell(r, c)
             cell.text = line[c] if c < len(line) else ""
+            # Every other *body* row: banding that counted the header would put the first
+            # band immediately under it, and read as a second header rather than a stripe.
+            if band and r >= head and (r - head) % 2 == 1:
+                cell.fill.solid()
+                cell.fill.fore_color.rgb = RGBColor.from_string(band.lstrip("#"))
             for para in cell.text_frame.paragraphs:
                 for run in para.runs:
                     run.font.size = Pt(14)
@@ -506,23 +579,25 @@ def _is_text_slot(laid_out) -> bool:
     return laid_out.shape not in ("tabular", "chart", "media")
 
 
-def _write_object(slide, laid_out, value, name: str, box) -> int | None:
-    """Write a non-text slot as a real object.
-
-    `media` is deliberately absent: a managed image slot names an asset the harness has not
-    been given a path for, and inventing a placeholder picture would be worse than leaving
-    the frame empty. That is the next gap, not a silent one.
-    """
+def _write_object(slide, laid_out, value, name: str, box, theme,
+                  assets: Assets | None = None,
+                  size: tuple[int, int] | None = None) -> int | None:
+    """Write a non-text slot as a real object: a table, a chart, or a picture."""
     x, y, w, h = box
     frame = Frame(x=x, y=y, cx=w, cy=h)
+
+    if laid_out.shape == "media":
+        return _write_media(slide, laid_out, value, name, theme, assets, size)
 
     if laid_out.shape == "tabular" and isinstance(value, dict):
         spec = TableSpec(headers=[str(c) for c in (value.get("headers") or [])],
                          rows=[[str(c) for c in row] for row in (value.get("rows") or [])])
         if not (spec.headers or spec.rows):
             return None
+        paint = decoration_mod.paint_for(theme, laid_out.decoration, laid_out.shape)
         return _add_table(slide, Shape(id=name, ooxml_id=0, type="table",
-                                       frame=frame, table=spec))
+                                       frame=frame, table=spec),
+                          band=paint.fill or None)
 
     if laid_out.shape == "chart" and isinstance(value, dict):
         # `categories` is what `ChartSpec`, the `add_chart` schema and the model all call
@@ -542,22 +617,37 @@ def _write_object(slide, laid_out, value, name: str, box) -> int | None:
     return None
 
 
-def _slot_text(value) -> str:
-    """The canonical rendering, shared with the budget and the preview."""
-    return slots.slot_text(value)
+def _write_media(slide, laid_out, value, name: str, theme,
+                 assets: Assets | None, size: tuple[int, int] | None) -> int | None:
+    """A managed `media` slot as a real picture.
 
+    This is the slot the writer used to skip, and skipping it was not a small gap: it made
+    `image_full`'s `bleed` and `inset` the same empty frame, left `image_split` unable to put
+    a picture beside its prose, and so retired both components while the catalog went on
+    offering them. Imagery is the largest visual lever the harness has and it was writing
+    none of it.
 
-def _cells_of(laid_out: expand.LaidOutSlot, value) -> list[tuple[str, expand.Box]]:
-    """The text boxes one slot becomes: usually one, and one per item across a row.
-
-    Single-column slots return exactly what the writer produced before cells existed — the
-    whole slot as one frame — so the only export this can change is the one that was drawing
-    a row as a column.
+    The rectangle is the expander's, twice over. `media_scale` shrinks the slot box about its
+    own centre and `Box.fit` letterboxes the picture inside what is left — see `io/media.py`
+    for why proportions are held rather than cropped — so the picture is inside its box by
+    construction, and the preview draws the same rule with `object-fit: contain` on the same
+    scaled box. Neither of them is allowed its own arithmetic.
     """
-    if laid_out.columns <= 1 or not isinstance(value, list):
-        return [(_slot_text(value), laid_out.box)]
-    parts = [slots.slot_text(item) for item in value]
-    return list(zip(parts, laid_out.cells(len(parts)), strict=False))
+    found = media_mod.payload(value)
+    if found is None or size is None:
+        return None
+    asset_id, alt = found
+    asset = media_mod.resolve(asset_id, assets)
+    if asset is None:
+        return None
+
+    placed = (laid_out.box
+              .scaled(overrides_mod.media_factor(laid_out.overrides))
+              .fit(asset.aspect))
+    x, y, w, h = placed.emu(*theme.grid.canvas, *size)
+    return _add_picture(slide, Shape(id=name, ooxml_id=0, type="picture",
+                                     frame=Frame(x=x, y=y, cx=w, cy=h), alt=alt),
+                        image=asset.image())
 
 
 def _is_stat_slot(value) -> bool:
@@ -569,6 +659,45 @@ def _is_stat_slot(value) -> bool:
     """
     return (isinstance(value, list) and bool(value)
             and all(slots.is_stat(item) for item in value))
+
+
+def _paint_panel(slide, box: tuple[int, int, int, int], paint: decoration_mod.Paint,
+                 name: str, emu_per_px: float) -> None:
+    """The rectangle a decorated variant draws behind a written box.
+
+    A real autoshape, so the recipient can restyle it, and every property is stated. An
+    autoshape left alone inherits the master's accent fill, its outline and a preset
+    shadow — a card coloured by whichever template the deck is opened against is not the
+    card the theme asked for, and it is exactly the divergence the writer exists to close.
+
+    `box` is EMU and `paint.radius` is canvas px, so the scale is passed rather than the
+    original px rectangle: `eject_slide` freezes panels as shapes whose geometry is already
+    absolute, and it has no px box left to hand back.
+    """
+    from pptx.dml.color import RGBColor
+    from pptx.enum.shapes import MSO_SHAPE
+
+    x, y, w, h = box
+    shape = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE,
+                                   Emu(x), Emu(y), Emu(w), Emu(h))
+    shape.name = name
+    # roundRect's adjustment is a fraction of the shorter side rather than a length, so the
+    # theme's radius is divided by the box it is drawn on instead of converted to EMU.
+    shorter_px = min(w, h) / max(emu_per_px, 1e-9)
+    shape.adjustments[0] = min(0.5, paint.radius / max(1.0, shorter_px))
+    if paint.fill:
+        shape.fill.solid()
+        shape.fill.fore_color.rgb = RGBColor.from_string(paint.fill.lstrip("#"))
+    else:
+        shape.fill.background()
+    if paint.line:
+        shape.line.color.rgb = RGBColor.from_string(paint.line.lstrip("#"))
+        shape.line.width = Pt(decoration_mod.LINE_PX * 0.75)  # canvas px at 96dpi -> pt
+    else:
+        shape.line.fill.background()
+    # The theme's shape language says `shadow: none`; inheriting the master's preset one
+    # would be the template deciding what a themed card looks like.
+    shape.shadow.inherit = False
 
 
 def _style(frame, laid_out: expand.LaidOutSlot, theme, *, stat: bool = False) -> None:
@@ -721,11 +850,20 @@ def export(
     mode: ExportMode = "editable",
     strict: bool = True,
     embed_fonts_: bool = True,
+    assets: Assets | None = None,
 ) -> ExportReport:
     """Write `deck` to `path`.
 
     With a `source_path`, the original package is copied and patched. Without one, a new
     presentation is built at the theme's canvas size.
+
+    `assets` is the deck's pictures, `{asset_id: (content_type, bytes)}`, and it is a
+    parameter rather than something read off the deck because assets are deliberately not
+    part of the document model — they live on the store (`DeckStore.assets`) so that a
+    174 MB deck's images are not carried through every snapshot. Omitting them is legal and
+    costs nothing to a deck with no `media` slot; a deck that has one gets a
+    `slot_not_written` violation naming the asset, which is the loud version of the silence
+    this exists to prevent.
     """
     path = Path(path)
     report = ExportReport(path=path, mode=mode)
@@ -768,7 +906,7 @@ def export(
                     # `duplicate_slide` and `eject_slide` are both shipped, and using them
                     # together on a generated deck made it unexportable.
                     before = len(prs.slides._sldIdLst)
-                    report.shapes_added += _write_ejected(prs, model, deck, written)
+                    report.shapes_added += _write_ejected(prs, model, deck, written, assets)
                     if len(prs.slides._sldIdLst) > before:
                         placed.append(list(prs.slides)[-1])
                     report.slides_written += 1
@@ -807,7 +945,7 @@ def export(
                 # where it could never be exported again. The user's work was unrecoverable
                 # through the one door that leads out of the harness.
                 before = len(prs.slides._sldIdLst)
-                report.shapes_added += _write_ejected(prs, model, deck, written)
+                report.shapes_added += _write_ejected(prs, model, deck, written, assets)
                 if len(prs.slides._sldIdLst) > before:
                     placed.append(list(prs.slides)[-1])
                 report.slides_written += 1
@@ -816,7 +954,7 @@ def export(
             placed.append(existing[index])
         else:
             before = len(prs.slides._sldIdLst)
-            report.shapes_added += _write_managed(prs, model, deck, written, dropped)
+            report.shapes_added += _write_managed(prs, model, deck, written, dropped, assets)
             if len(prs.slides._sldIdLst) > before:
                 placed.append(list(prs.slides)[-1])
         report.slides_written += 1

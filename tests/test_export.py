@@ -14,6 +14,8 @@ what the recipient opens.
 
 from __future__ import annotations
 
+import io
+import itertools
 import zipfile
 from pathlib import Path
 
@@ -21,6 +23,7 @@ import pytest
 from lxml import etree
 from pptx import Presentation
 
+from ppt_harness.components import decoration
 from ppt_harness.core.session import Session
 from ppt_harness.io import writer_assertions as fidelity
 from ppt_harness.io.export_mutate import ExportError, export
@@ -369,6 +372,395 @@ def test_a_row_of_stats_is_written_across_not_down(blank: Session, tmp_path: Pat
 
     figures = [b.text_frame.paragraphs[0].runs[0].text for b in boxes]
     assert "8.3%" in figures, "the figure was dropped; only the label survived"
+
+
+def _place(session: Session, component: str, variant: str, slots: dict) -> None:
+    assert router.dispatch(session, "add_slide", {"layout": "stack", "blocks": [
+        {"region": "body", "component": component, "variant": variant,
+         "slots": slots}]})["ok"]
+
+
+def _rendering(slide) -> list[tuple]:
+    """What the file says about a slide, less the ids that differ per session.
+
+    Shape kind, slot, box, and — for a table, whose geometry the recipient's style decides —
+    which rows are painted. Anything a reader could see the difference in.
+    """
+    out = []
+    for shape in slide.shapes:
+        row: list = [str(shape.shape_type), shape.name.split(":")[-1],
+                     shape.left, shape.top, shape.width, shape.height]
+        if getattr(shape, "has_table", False):
+            row.append(tuple(str(shape.table.cell(r, 0).fill.type)
+                             for r in range(len(shape.table.rows))))
+            row.append(shape.table.horz_banding)
+        out.append(tuple(row))
+    return out
+
+
+#: A real image, generated rather than committed, because the only thing any of these tests
+#: cares about is its proportions — and a binary in the repository is a thing to explain.
+ASSET = "a"
+PICTURE = (320, 200)
+
+
+def _png(size: tuple[int, int] = PICTURE) -> bytes:
+    from PIL import Image as PILImage
+
+    buffer = io.BytesIO()
+    PILImage.new("RGB", size, (0x15, 0x60, 0x82)).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _with_asset(session: Session, size: tuple[int, int] = PICTURE) -> dict:
+    """Put a picture in the deck's assets and hand back the slot payload that names it.
+
+    Assets live on the *store*, not on the deck — they are deliberately outside the document
+    model — so this is also what the export tool does when it threads `session.assets`
+    through to the writer.
+    """
+    session.store.assets[ASSET] = ("image/png", _png(size))
+    return {"asset_id": ASSET, "alt": "A photograph of the thing"}
+
+
+STATS = [{"value": "8.3%", "label": "EMEA churn"}, {"value": "+41%", "label": "Expansion"}]
+GRID = {"headers": ["Region", "Q1"],
+        "rows": [["us-east", "18.2"], ["us-west", "11.9"], ["eu-central", "9.4"]]}
+MEDIA = {"asset_id": ASSET, "alt": "A photograph of the thing"}
+SIBLINGS = [
+    ("stat_row", "flat", "carded", {"items": STATS}),
+    ("comparison", "split", "table", {"left": ["Now"], "right": ["Later"]}),
+    ("data_table", "plain", "zebra", {"tabular": GRID}),
+    ("image_split", "image_left", "image_right",
+     {"media": MEDIA, "prose": "What the picture shows"}),
+    ("image_full", "bleed", "inset", {"media": MEDIA}),
+]
+
+
+@pytest.mark.parametrize("component,first,second,slots", SIBLINGS,
+                         ids=[f"{c}-{a}-{b}" for c, a, b, _ in SIBLINGS])
+def test_variants_the_catalog_offers_reach_the_file_as_different_slides(
+    blank: Session, tmp_path: Path, component: str, first: str, second: str, slots: dict
+) -> None:
+    """The catalog was promising renderings the writer never made.
+
+    These pairs expanded to the same boxes and exported the same shapes, so a model that
+    asked for `carded` was told it got one and shipped `flat`. On the file, because the file
+    is what the recipient opens.
+
+    `image_full` is here because it was the worst of them: `bleed` and `inset` differ only in
+    a margin around a picture, and the writer placed no picture at all, so the two variants
+    were the same *empty* slide.
+    """
+    _with_asset(blank)
+    _place(blank, component, first, slots)
+    _place(blank, component, second, slots)
+    out = tmp_path / "siblings.pptx"
+    export(blank.deck, out, assets=blank.assets)
+
+    one, two = list(Presentation(str(out)).slides)[:2]
+    assert _rendering(one) != _rendering(two)
+
+
+# ------------------------------------------------------------------------- media
+
+
+def _picture(slide):
+    from pptx.enum.shapes import MSO_SHAPE_TYPE
+
+    found = [s for s in slide.shapes if s.shape_type == MSO_SHAPE_TYPE.PICTURE]
+    assert found, "the media slot exported no picture"
+    return found[0]
+
+
+def test_a_media_slot_puts_a_real_picture_in_the_file(blank: Session,
+                                                     tmp_path: Path) -> None:
+    """The writer skipped `media` entirely, and skipping it retired two components.
+
+    `image_full` and `image_split` are the whole of the catalog's imagery, and every slide
+    built from either exported as its caption and a blank rectangle. Checked on the file,
+    with the alt text, because `descr` is the only part of a picture a screen reader can
+    reach and `add_image` has refused a picture without one since it shipped.
+    """
+    payload = _with_asset(blank)
+    _place(blank, "image_full", "bleed", {"media": payload})
+    out = tmp_path / "media.pptx"
+    report = export(blank.deck, out, assets=blank.assets)
+
+    picture = _picture(Presentation(str(out)).slides[0])
+    assert picture._element._nvXxPr.cNvPr.get("descr") == payload["alt"]
+    assert not report.violations
+
+
+def test_a_picture_keeps_its_proportions_and_stays_inside_its_box(blank: Session,
+                                                                  tmp_path: Path) -> None:
+    """Letterboxed, never cropped and never stretched — see `io/media.py`.
+
+    Two claims, and both matter for the same reason: the harness chose the box but has never
+    seen the image. Overflowing it would put a picture over the slide's own margins, and
+    filling it by distortion or by cropping would be the writer deciding which part of
+    somebody's photograph is the point.
+    """
+    payload = _with_asset(blank, size=(400, 100))  # far wider than any slot box
+    _place(blank, "image_full", "bleed", {"media": payload})
+    out = tmp_path / "aspect.pptx"
+    export(blank.deck, out, assets=blank.assets)
+
+    slide = Presentation(str(out)).slides[0]
+    picture = _picture(slide)
+    box = _slot_box(blank, "media")
+    assert picture.width / picture.height == pytest.approx(400 / 100, rel=1e-3), \
+        "the picture was stretched or cropped to fill its box"
+    assert box[0] <= picture.left and box[1] <= picture.top
+    assert picture.left + picture.width <= box[0] + box[2] + 1
+    assert picture.top + picture.height <= box[1] + box[3] + 1
+
+
+def test_bleed_and_inset_reach_the_file_as_different_pictures(blank: Session,
+                                                              tmp_path: Path) -> None:
+    """A margin, which is what the two words mean, and it has to be visible in the file.
+
+    The expander has drawn this distinction for as long as `inset` has existed; nothing
+    downstream carried it, so the pair was indistinguishable to the recipient. Strictly
+    inside, on every edge — "different" would also be satisfied by a picture that moved.
+    """
+    payload = _with_asset(blank)
+    _place(blank, "image_full", "bleed", {"media": payload})
+    _place(blank, "image_full", "inset", {"media": payload})
+    out = tmp_path / "bleed-inset.pptx"
+    export(blank.deck, out, assets=blank.assets)
+
+    one, two = list(Presentation(str(out)).slides)[:2]
+    bleed, inset = _picture(one), _picture(two)
+    assert inset.width < bleed.width and inset.height < bleed.height
+    assert bleed.left < inset.left and bleed.top < inset.top
+
+
+def test_media_scale_shrinks_the_picture_without_moving_it(blank: Session,
+                                                           tmp_path: Path) -> None:
+    """`media_scale` is a clamped override that had no reader anywhere in the harness.
+
+    Concentric, because "fills 60% of its box" describes a smaller picture in the same place,
+    not one pushed into a corner.
+    """
+    payload = _with_asset(blank)
+    _place(blank, "image_full", "bleed", {"media": payload})
+    block = blank.deck.slides[0].blocks[0]
+    assert router.dispatch(blank, "set_override", {
+        "slide_id": blank.deck.slides[0].id, "block_id": block.id,
+        "key": "media_scale", "value": 0.6})["ok"]
+
+    out = tmp_path / "scaled.pptx"
+    export(blank.deck, out, assets=blank.assets)
+    small = _picture(Presentation(str(out)).slides[0])
+
+    blank.deck.slides[0].blocks[0].overrides = {}
+    export(blank.deck, out, assets=blank.assets)
+    full = _picture(Presentation(str(out)).slides[0])
+
+    assert small.width < full.width and small.height < full.height
+    assert (small.left + small.width / 2) == pytest.approx(full.left + full.width / 2, abs=2)
+    assert (small.top + small.height / 2) == pytest.approx(full.top + full.height / 2, abs=2)
+
+
+def test_a_media_slot_whose_asset_is_behind_nothing_is_reported(blank: Session,
+                                                                tmp_path: Path) -> None:
+    """The same claim as the chart bug, for the slot that replaced it as the silent one.
+
+    A picture the deck names and the file does not have is content the user will not find,
+    and the export report is where that has to be said. Nothing is invented in its place: a
+    placeholder rectangle would be a shape the managed slide never had.
+    """
+    _place(blank, "image_full", "bleed",
+           {"media": {"asset_id": "nothing-is-here.png", "alt": "A photograph"}})
+    report = export(blank.deck, tmp_path / "missing.pptx", strict=False,
+                    assets=blank.assets)
+
+    dropped = [v for v in report.violations if v.rule == "slot_not_written"]
+    assert dropped, "a media slot with no asset exported silently"
+    assert "media" in dropped[0].detail
+
+
+@pytest.mark.parametrize("payload,error", [
+    ({"alt": "A photograph"}, "media_needs_asset"),
+    ({"asset_id": ASSET}, "alt_required"),
+    ({"asset_id": ASSET, "alt": "   "}, "alt_required"),
+])
+def test_a_media_slot_must_name_a_picture_and_describe_it(blank: Session, payload: dict,
+                                                          error: str) -> None:
+    """Alt text is required on the managed path too, and refused at the gate.
+
+    `add_image` has refused a picture with no alt text since it shipped; a `media` slot is
+    the same picture reached through a component, and a rejected write is the cheapest
+    possible failure — the alternative is `ok` now and a missing picture at export.
+    """
+    result = router.dispatch(blank, "add_slide", {"layout": "stack", "blocks": [
+        {"region": "body", "component": "image_full", "variant": "bleed",
+         "slots": {"media": payload}}]})
+    assert result["ok"] is False
+    assert result["error"] == error
+
+
+def test_the_preview_draws_the_picture_the_file_gets(blank: Session,
+                                                     tmp_path: Path) -> None:
+    """Preview equals export, which is the invariant everything else here is measured on.
+
+    A media slot the preview left blank is how `bleed` and `inset` managed to look identical
+    in *both*: the two disagreed with each other about nothing, because neither drew
+    anything. The rectangle is checked, not just the presence of an `<img>` — the preview
+    holds the slot box shrunk by `media_scale` and lets `object-fit: contain` letterbox
+    inside it, which is the writer's `Box.fit` expressed in CSS.
+    """
+    payload = _with_asset(blank)
+    _place(blank, "image_full", "bleed", {"media": payload})
+    slide = blank.deck.slides[0]
+
+    markup = blank.render_html(slide.id)
+    assert "<img" in markup and payload["alt"] in markup
+    assert "object-fit: contain" in markup
+
+    box = _slot_box(blank, "media")
+    export(blank.deck, tmp_path / "agree.pptx", assets=blank.assets)
+    picture = _picture(Presentation(str(tmp_path / "agree.pptx")).slides[0])
+    # The preview's container is the slot box itself at `media_scale: 1.0`; the file's
+    # picture is letterboxed inside it. Same box, same rule.
+    assert box[0] <= picture.left and picture.left + picture.width <= box[0] + box[2] + 1
+
+
+def _slot_box(session: Session, slot: str) -> tuple[int, int, int, int]:
+    """The EMU rectangle the expander gave one slot of the first slide's first block."""
+    from ppt_harness.render import expand
+
+    slide = session.deck.slides[0]
+    laid_out = next(s for s in expand.expand_slide(session.theme, slide) if s.slot == slot)
+    cx, cy = session.slide_size_emu()
+    return laid_out.box.emu(*session.theme.grid.canvas, cx, cy)
+
+
+# -------------------------------------------------------------------------- eject
+
+
+def test_an_ejected_carded_slide_keeps_its_cards(blank: Session, tmp_path: Path) -> None:
+    """Eject is one-way, so anything it drops is destroyed rather than mislaid.
+
+    It froze TEXT shapes and only text shapes, so a slide built from a decorated variant left
+    managed mode without its panels and there was no way back to them. Compared against the
+    managed export of the same slide, because "lossless" is a claim about the file the
+    recipient opens, not about the shape list.
+    """
+    _place(blank, "stat_row", "carded", {"items": STATS})
+    slide_id = blank.deck.slides[0].id
+
+    managed_out = tmp_path / "managed.pptx"
+    export(blank.deck, managed_out, assets=blank.assets)
+    before = [(s.left, s.top, s.width, s.height)
+              for s in Presentation(str(managed_out)).slides[0].shapes
+              if s.name.endswith(".panel")]
+    assert before, "the managed slide had no cards to lose"
+
+    assert router.dispatch(blank, "eject_slide", {"slide_id": slide_id})["ok"]
+    assert blank.deck.slides[0].mode is Mode.FREEFORM
+    frozen = [s for s in blank.deck.slides[0].shapes if s.geometry is not None]
+    assert len(frozen) == len(before), "the cards were dropped on the way out"
+
+    ejected_out = tmp_path / "ejected.pptx"
+    export(blank.deck, ejected_out, strict=False, assets=blank.assets)
+    slide = Presentation(str(ejected_out)).slides[0]
+    names = [s.name for s in slide.shapes]
+    panels = [s for s in slide.shapes if s.name.endswith("_panel")]
+    assert [(s.left, s.top, s.width, s.height) for s in panels] == before, \
+        "the frozen cards are not where the managed slide drew them"
+
+    paint = decoration.paint_for(blank.theme, "card", "list")
+    for panel in panels:
+        assert str(panel.fill.fore_color.rgb) == paint.fill.lstrip("#").upper()
+        assert names.index(panel.name) < names.index(panel.name.removesuffix("_panel")), \
+            "a card frozen after its words would cover them"
+
+
+def test_an_ejected_image_slide_keeps_its_picture(blank: Session, tmp_path: Path) -> None:
+    """Same one-way loss, on the slot the slide is actually about.
+
+    The frozen frame carries the picture's own proportions, so the ejected slide is the
+    managed one rather than a re-derivation of it — `eject_slide` asks `Box.fit` exactly the
+    question the writer does.
+    """
+    payload = _with_asset(blank)
+    _place(blank, "image_full", "inset", {"media": payload})
+    slide_id = blank.deck.slides[0].id
+
+    managed_out = tmp_path / "managed-image.pptx"
+    export(blank.deck, managed_out, assets=blank.assets)
+    before = _picture(Presentation(str(managed_out)).slides[0])
+    frame = (before.left, before.top, before.width, before.height)
+
+    assert router.dispatch(blank, "eject_slide", {"slide_id": slide_id})["ok"]
+    ejected_out = tmp_path / "ejected-image.pptx"
+    export(blank.deck, ejected_out, strict=False, assets=blank.assets)
+
+    after = _picture(Presentation(str(ejected_out)).slides[0])
+    assert (after.left, after.top, after.width, after.height) == frame
+    assert after._element._nvXxPr.cNvPr.get("descr") == payload["alt"]
+
+
+def test_a_carded_variant_paints_its_cards_from_the_themes_roles(blank: Session,
+                                                                 tmp_path: Path) -> None:
+    """A card is a theme decision the writer carries out, not a colour it chooses.
+
+    Checked against the theme's own answer and against the palette, because a decoration
+    holding a hex value would be `set_font` wearing a different name. The ordering is part
+    of the claim: the panel is drawn before the words, or it covers them.
+    """
+    _place(blank, "stat_row", "carded", {"items": STATS})
+    out = tmp_path / "carded.pptx"
+    export(blank.deck, out)
+
+    slide = Presentation(str(out)).slides[0]
+    names = [s.name for s in slide.shapes]
+    panels = [s for s in slide.shapes if s.name.endswith(".panel")]
+    assert len(panels) == len(STATS), "a card behind each figure, or none at all"
+
+    paint = decoration.paint_for(blank.theme, "card", "list")
+    palette = {v for v in blank.theme.palette.values() if isinstance(v, str)}
+    assert {paint.fill, paint.line} <= palette, "a card was painted from outside the palette"
+
+    for panel in panels:
+        assert str(panel.fill.fore_color.rgb) == paint.fill.lstrip("#").upper()
+        assert str(panel.line.color.rgb) == paint.line.lstrip("#").upper()
+        figure = panel.name.removesuffix(".panel")
+        assert names.index(panel.name) < names.index(figure), "the card is over the words"
+        text = next(s for s in slide.shapes if s.name == figure)
+        assert panel.left <= text.left and panel.top <= text.top
+        assert panel.left + panel.width >= text.left + text.width
+
+
+def test_zebra_bands_alternate_rows_and_plain_states_that_it_does_not(blank: Session,
+                                                                     tmp_path: Path) -> None:
+    """`bandRow` is inherited from whatever table style the package carries, so which of
+    these two the recipient saw was their template's decision rather than the variant's.
+
+    The stripe is written onto the cells as well, for the same reason: a style the harness
+    did not author is not one it can rely on to paint anything.
+    """
+    _place(blank, "data_table", "plain", {"tabular": GRID})
+    _place(blank, "data_table", "zebra", {"tabular": GRID})
+    out = tmp_path / "zebra.pptx"
+    export(blank.deck, out)
+
+    plain, zebra = (next(s.table for s in slide.shapes if getattr(s, "has_table", False))
+                    for slide in list(Presentation(str(out)).slides)[:2])
+    assert plain.horz_banding is False and zebra.horz_banding is True
+    assert all(plain.cell(r, 0).fill.type is None for r in range(len(plain.rows))), \
+        "the plain variant painted a row"
+
+    fills = [zebra.cell(r, 0).fill for r in range(len(zebra.rows))]
+    banded = [r for r, fill in enumerate(fills) if fill.type is not None]
+    assert banded, "zebra banded nothing"
+    assert 0 not in banded, "the header was banded, so it reads as a second header"
+    assert all(b - a == 2 for a, b in itertools.pairwise(banded)), \
+        "the stripes are not alternate rows"
+    band = decoration.paint_for(blank.theme, "banded", "tabular")
+    assert str(fills[banded[0]].fore_color.rgb) == band.fill.lstrip("#").upper()
 
 
 def test_a_slot_exports_in_the_face_its_role_asks_for(blank: Session, tmp_path: Path) -> None:
