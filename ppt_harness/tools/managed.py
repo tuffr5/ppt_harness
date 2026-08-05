@@ -30,6 +30,65 @@ def _require_managed(session: Session, slide_id: str) -> Slide:
     return slide
 
 
+#: What a structured slot has to look like before the writer will get anything out of it,
+#: and the shape to quote back when it does not — DESIGN §1.5 (canonical slot shapes).
+#:
+#: Only the shapes the writer builds an *object* from are here. `title`, `prose` and `list`
+#: all reach the file through the text path, which flattens whatever it is given, so a
+#: mistyped one lands as text rather than as nothing; these three land as nothing at all.
+#: Each entry is the keys the writer needs, as groups of alternatives — a group is satisfied
+#: by any one of its names. `chart` reads `categories` or `labels` and this has to accept
+#: both, or the gate would refuse payloads the writer builds happily. `kind` is absent
+#: because the writer defaults it; a gate stricter than the writer is its own bug.
+_STRUCTURED: dict[str, tuple[tuple[tuple[str, ...], ...], str]] = {
+    "tabular": ((("headers",), ("rows",)),
+                '{"headers": [...], "rows": [[...], ...]}'),
+    "chart": ((("categories", "labels"), ("series",)),
+              '{"kind": "bar", "categories": [...], '
+              '"series": [{"name": ..., "values": [...]}]}'),
+}
+
+
+def _check_structured(component: str, slots: dict[str, Any]) -> None:
+    """A `tabular` or `chart` slot carries the object the writer builds from, or it is refused.
+
+    Found by generating a deck: a model handed `data_table.tabular` a list of pre-joined
+    strings, `add_slide` said `ok`, budget-checked it, measured it, and returned a render —
+    and the deck then failed to export with `slot_not_written`, having been certified twice
+    on the way. The slot's *shape* was the one thing nothing checked.
+
+    That ordering is the fault. "A write is checked before it lands" is the harness's claim,
+    and a write that lands and cannot be written is a worse failure than a refusal, because
+    the model has already been told it succeeded and moved on. Same argument as `_check_media`
+    below: refuse at the gate, name the shape, and let the cheapest failure be the one that
+    never rendered.
+
+    Keys only, never their contents. Whether `rows` is rectangular or a series has as many
+    values as there are labels is the writer's business, and a gate that tried to decide it
+    here would be a second implementation of the writer, free to disagree with it.
+    """
+    comp = registry.get(component)
+    for name, value in slots.items():
+        spec = comp.slots.get(name)
+        if spec is None or not value:
+            continue
+        expected = _STRUCTURED.get(spec.shape)
+        if expected is None:
+            continue
+        groups, example = expected
+        missing = [" or ".join(g) for g in groups
+                   if not isinstance(value, dict) or not any(value.get(k) for k in g)]
+        if missing:
+            got = type(value).__name__
+            raise ToolError(
+                "bad_slot_shape",
+                f"{component}.{name} is a {spec.shape} slot and takes {example}; "
+                f"got {got} missing {missing}. The writer builds a real "
+                f"{'table' if spec.shape == 'tabular' else 'chart'} from those keys, so "
+                "text arranged to look like one cannot be written at all.",
+            )
+
+
 def _check_media(component: str, slots: dict[str, Any]) -> None:
     """A `media` slot names a picture and describes it. Both, or the write is refused.
 
@@ -146,6 +205,7 @@ def add_slide(
         if missing:
             raise ToolError("missing_slot", f"{key} requires {missing}")
         _check_media(key, spec["slots"])
+        _check_structured(key, spec["slots"])
         built.append(Block(id=session.new_id("bk"), region=region, component=key,
                            variant=variant, slots=spec["slots"]))
 
@@ -266,6 +326,7 @@ def set_slots(session: Session, slide_id: str, block_id: str, patch: dict[str, A
         raise ToolError("unknown_slot",
                         f"{block.component} has no slot(s) {sorted(unknown)}")
     _check_media(block.component, patch)
+    _check_structured(block.component, patch)
 
     before = dict(block.slots)
     trial = Block(id=block.id, region=block.region, component=block.component,

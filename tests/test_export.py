@@ -863,3 +863,36 @@ def test_an_export_the_writer_refuses_is_a_result_not_an_exception(imported: Ses
     assert result["ok"] is False
     assert result["error"] == "export_failed"
     assert "no original" in result["message"]
+
+
+@pytest.mark.parametrize("component,slot,payload", [
+    ("data_table", "tabular", ["Region | Q1", "EMEA | 18.2"]),
+    ("data_table", "tabular", {"rows": [["EMEA", "18.2"]]}),
+    ("data_table", "tabular", "Region  Q1\nEMEA  18.2"),
+    ("chart", "chart", {"kind": "bar", "categories": ["a", "b"]}),  # no series
+])
+def test_a_structured_slot_is_refused_before_it_lands(blank: Session, component: str,
+                                                      slot: str, payload: object) -> None:
+    """The gate checks the slot's *shape*, not only its budget.
+
+    Found by generating a deck: a model handed `tabular` a list of pre-joined strings,
+    `add_slide` returned `ok` with a render attached, and the export then failed with
+    `slot_not_written`. A write that lands and cannot be written is worse than a refusal,
+    because the model has been told it succeeded and has moved on.
+    """
+    result = router.dispatch(blank, "add_slide", {"layout": "stack", "blocks": [
+        {"region": "body", "component": component, "slots": {slot: payload}}]})
+    assert result["ok"] is False
+    assert result["error"] == "bad_slot_shape"
+    assert slot in result["message"], "the refusal names the slot it is about"
+
+
+def test_a_well_formed_table_still_lands(blank: Session, tmp_path: Path) -> None:
+    """The negative case for the gate above: the shape it asks for is the shape that works,
+    all the way through to a real table in the file."""
+    written = router.dispatch(blank, "add_slide", {"layout": "stack", "blocks": [
+        {"region": "body", "component": "data_table", "slots": {
+            "tabular": {"headers": ["Region", "Q1"], "rows": [["EMEA", "18.2"]]}}}]})
+    assert written["ok"]
+    out = router.dispatch(blank, "export", {"path": str(tmp_path / "t.pptx")})
+    assert out["ok"], out.get("violations")
