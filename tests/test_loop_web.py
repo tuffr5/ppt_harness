@@ -859,3 +859,47 @@ def test_starting_over_swaps_the_deck_the_whole_app_is_looking_at() -> None:
     assert outline["template"] == "signal (built in)"
     assert outline["deck"] == "Fresh"
     assert client.get("/api/theme").json()["palette"]["brand"] == "#0F766E"
+
+
+def _app_with(session: Session, fake: FakeClient, monkeypatch) -> TestClient:
+    """The app, with its own agent talking to a fake endpoint.
+
+    The agent is built inside `create_app` — that is what lets `/api/start` replace it — so
+    a test cannot hand one in. Patching the name `create_app` resolves reaches the same
+    agent the routes use, rather than a second one that proves nothing about them.
+    """
+    import ppt_harness.adapters.web as web
+
+    monkeypatch.setattr(web, "Agent",
+                        lambda s, **kw: loop.Agent(s, client=fake, **kw))
+    return TestClient(web.create_app(session))
+
+
+def test_the_greeting_prompt_is_not_replayed_as_something_the_user_said(
+        imported: Session, monkeypatch) -> None:
+    """`/api/history` is the human's record, not the model's.
+
+    The greeting has to be asked for as a user message — that is the only way to ask a model
+    for anything — but nobody typed it. Replaying the message list verbatim put "Open the
+    conversation in two or three sentences…" in the log attributed to the person reading it,
+    above a reply to an instruction they never gave.
+    """
+    fake = FakeClient([_Msg(content="Five imported slides, ready when you are.")])
+    client = _app_with(imported, fake, monkeypatch)
+    client.post("/api/greeting").read()
+
+    turns = client.get("/api/history").json()["turns"]
+    assert [t["role"] for t in turns] == ["assistant"], \
+        f"the greeting instruction was replayed as a user turn: {turns}"
+    assert turns[0]["text"] == "Five imported slides, ready when you are."
+
+
+def test_a_real_user_turn_is_still_replayed(imported: Session, monkeypatch) -> None:
+    """The subtraction is the greeting prompt exactly, not "user turns that look internal"."""
+    fake = FakeClient([_Msg(content="Renamed it.")])
+    client = _app_with(imported, fake, monkeypatch)
+    client.post("/api/chat", json={"prompt": "retitle slide 1"}).read()
+
+    turns = client.get("/api/history").json()["turns"]
+    assert [t["role"] for t in turns] == ["user", "assistant"]
+    assert turns[0]["text"] == "retitle slide 1"

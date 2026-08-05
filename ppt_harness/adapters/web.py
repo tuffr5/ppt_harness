@@ -19,6 +19,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
+from ..core import loop as loop_mod
 from ..core.loop import Agent
 from ..core.session import Session
 from ..fidelity import reference
@@ -170,6 +171,13 @@ def create_app(session: Session, *, model: str | None = None,
 
         Read from the provider's own message list rather than a second copy: two records of
         the same conversation drift, and the one the model sees is the one that is true.
+
+        With one subtraction. The greeting is asked for as an ordinary user message, because
+        that is the only way to ask a model for anything — but *nobody typed it*, and
+        replaying it put "Open the conversation in two or three sentences…" in the log
+        attributed to the person reading it, above a reply to an instruction they never gave.
+        The transcript is what a human is owed; the message list is what the model is owed,
+        and here they legitimately differ.
         """
         turns: list[dict[str, Any]] = []
         for message in state["agent"].messages:
@@ -178,6 +186,8 @@ def create_app(session: Session, *, model: str | None = None,
                 continue
             content = message.get("content")
             text = content if isinstance(content, str) else _text_of(content)
+            if role == "user" and text.strip() == loop_mod.OPENING.strip():
+                continue
             calls = message.get("tool_calls") or []
             if not text and not calls:
                 continue
