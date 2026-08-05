@@ -232,3 +232,36 @@ def add_asset(session: Session, path: str, key: str | None = None,
                "bytes": added.size, "reused": added.reused,
                "use": f'a media slot takes {{"asset_id": "{added.key}", "alt": ...}}'},
     ).as_result()
+
+
+@tool("list_assets",
+      "Pictures the deck is carrying, with the key each one is named by.",
+      obj({}))
+def list_assets(session: Session) -> dict[str, Any]:
+    """What `add_asset` filed, so a key is never lost.
+
+    A model that ingested a picture several turns ago and no longer has the key had no way
+    to ask, and a key is not something it can guess: it is content-addressed, so the digest
+    half is unguessable by construction. Without this the only recoveries are re-ingesting a
+    file the model may not know the path of, or a `media` slot naming something that is not
+    there — a `slot_not_written` violation discovered at export.
+
+    Carries the same facts `add_asset` returns, for the same reason: the caller is choosing a
+    slot, and the aspect ratio is what decides whether a picture will letterbox into thick
+    bands of background. Reads the shape back out of the bytes rather than storing it,
+    because the bytes are the only thing that cannot go stale.
+
+    Never the bytes themselves. This lands in a model's context, and a base64 image there
+    would cost more than every other read tool in the harness put together.
+    """
+    out = []
+    for key, (content_type, blob) in sorted(session.store.assets.items()):
+        found = media_mod.probe(blob)
+        entry: dict[str, Any] = {"asset_id": key, "media_type": content_type,
+                                 "bytes": len(blob)}
+        if found is not None:
+            px_w, px_h = found.px
+            entry |= {"width_px": px_w, "height_px": px_h,
+                      "aspect": round(found.aspect, 4)}
+        out.append(entry)
+    return {"assets": out, "count": len(out)}

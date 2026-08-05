@@ -443,3 +443,36 @@ def test_the_probe_reads_proportions_through_the_writers_own_decoder(tmp_path: P
     assert read.aspect == pytest.approx(4.0, rel=1e-3)
     assert media.probe(b"not an image at all") is None
     assert media.probe(io.BytesIO().getvalue()) is None
+
+
+def test_list_assets_recovers_a_key_the_model_lost(blank: Session, tmp_path: Path) -> None:
+    """A content-addressed key is unguessable by design, so losing one has to be survivable.
+
+    The alternatives without this are re-ingesting a file whose path the model may not have
+    kept, or naming a key that is not there and finding out at export.
+    """
+    one = _png(tmp_path / "wide.png", size=(600, 200))
+    key = router.dispatch(blank, "add_asset", {"path": str(one)})["after"]["asset_id"]
+
+    listed = router.dispatch(blank, "list_assets")
+    assert [a["asset_id"] for a in listed["assets"]] == [key]
+    assert listed["count"] == 1
+    entry = listed["assets"][0]
+    assert (entry["width_px"], entry["height_px"], entry["aspect"]) == (600, 200, 3.0), \
+        "the aspect ratio is the fact that decides whether a picture will letterbox"
+
+
+def test_list_assets_never_returns_the_bytes(blank: Session, tmp_path: Path) -> None:
+    """This lands in a model's context. A base64 image there would cost more than every
+    other read tool in the harness together."""
+    router.dispatch(blank, "add_asset", {"path": str(_png(tmp_path / "p.png"))})
+
+    listed = router.dispatch(blank, "list_assets")
+    assert len(str(listed)) < 400, "the listing is carrying image data"
+    assert all(not isinstance(v, bytes) for a in listed["assets"] for v in a.values())
+
+
+def test_an_empty_deck_lists_nothing_rather_than_failing(blank: Session) -> None:
+    """Silence and emptiness read the same to a model, so the count is stated."""
+    listed = router.dispatch(blank, "list_assets")
+    assert listed["assets"] == [] and listed["count"] == 0
