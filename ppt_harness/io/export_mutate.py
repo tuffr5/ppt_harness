@@ -786,7 +786,6 @@ def _custom_geometry(sp_pr, name: str):
     from lxml import etree
     from pptx.oxml.ns import qn
 
-    scale = ICON_PATH_UNITS / icon_set.view_box()
     geometry = sp_pr.makeelement(qn("a:custGeom"), {})
     for tag in ("a:avLst", "a:gdLst", "a:ahLst", "a:cxnLst"):
         etree.SubElement(geometry, qn(tag))
@@ -795,7 +794,11 @@ def _custom_geometry(sp_pr, name: str):
     path = etree.SubElement(path_list, qn("a:path"), {
         "w": str(ICON_PATH_UNITS), "h": str(ICON_PATH_UNITS), "fill": "none", "stroke": "1"})
 
-    for command, values in icon_set.segments(name):
+    # `icon_set.placed`, not a scale factor applied here, because the importer matches an
+    # incoming path against those same integers (`icons.identify`). Two roundings written
+    # two ways is how a mark the harness drew stops being one it can read back — see the
+    # note on `placed` for the half-unit case where the two spellings actually disagree.
+    for command, values in icon_set.placed(name, ICON_PATH_UNITS):
         if command == "Z":
             etree.SubElement(path, qn("a:close"))
             continue
@@ -807,8 +810,8 @@ def _custom_geometry(sp_pr, name: str):
             # stating, because the two disagree often enough elsewhere that it reads like an
             # oversight rather than a fact that was checked.
             etree.SubElement(node, qn("a:pt"), {
-                "x": str(round(values[index] * scale)),
-                "y": str(round(values[index + 1] * scale)),
+                "x": str(values[index]),
+                "y": str(values[index + 1]),
             })
     return geometry
 

@@ -21,6 +21,7 @@ from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE, PP_PLACEHOLDER
 from pptx.shapes.base import BaseShape
 
+from ..components import icons as icon_set
 from ..state.document import (
     ChartSpec,
     Deck,
@@ -98,6 +99,18 @@ R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 
 #: PowerPoint's default body size for a text box that states none, in points.
 DEFAULT_TEXTBOX_PT = 18.0
+
+#: `a:path` children an icon can be made of — exactly the four `export_mutate._custom_geometry`
+#: emits, and no more. An `a:arcTo` or `a:quadBezTo` in the path means the shape was drawn by
+#: something that is not this harness, and refusing to read it is how the match stays honest:
+#: the vendored set is normalised to `M`/`L`/`C`/`Z` at vendor time precisely so no other
+#: command can ever appear in one of ours.
+PATH_COMMAND = {
+    f"{{{A_NS}}}moveTo": "M",
+    f"{{{A_NS}}}lnTo": "L",
+    f"{{{A_NS}}}cubicBezTo": "C",
+    f"{{{A_NS}}}close": "Z",
+}
 
 def _first_size_pt(txbody) -> tuple[float | None, bool, bool]:
     """The first explicit size in a text body, plus whether that run is bold and italic.
@@ -282,6 +295,63 @@ def _poster(shape: BaseShape) -> tuple[str, str, bytes] | None:
     return hashlib.sha1(blob).hexdigest()[:16], content_type, blob
 
 
+def _icon_name(sp_pr) -> str:
+    """Which vendored icon this shape's custom geometry *is*, or `""` — DESIGN §7 step 1.
+
+    Import lands every slide as `freeform`, so an exported `icon_row` comes back as a handful
+    of shapes carrying `a:custGeom`. Left at that, the harness forgets a mark it drew itself:
+    `_geometry` finds no `a:prstGeom`, falls back to `preset="rect"`, and the preview draws a
+    stroked rectangle where the file holds a chevron — the harness showing a rendering the
+    file does not contain, which is the defect `components/icons` exists to have fixed.
+    `Geometry.icon` is already the model's word for this and already has both consumers
+    (`render/html` draws it from the path table, `export_mutate._add_icon` re-emits it); the
+    importer was the only edge missing.
+
+    Read off the shape's own `spPr` and nothing inherited: an icon states its geometry, and a
+    custom path resolved through a layout would be a claim about a *different* element.
+
+    Every check below is a way to say no, deliberately — DESIGN §7 is explicit that import
+    infers nothing silently, and a wrong name here is worse than none. A miss leaves the shape
+    exactly the anonymous freeform it is today; a false positive rewrites what the preview
+    draws and what the writer would re-emit if the slide were ever frozen again.
+    """
+    geometry = sp_pr.find(f"{{{A_NS}}}custGeom")
+    if geometry is None:
+        return ""
+    paths = geometry.findall(f"{{{A_NS}}}pathLst/{{{A_NS}}}path")
+    if len(paths) != 1:
+        return ""
+    path = paths[0]
+    # A square space with a stated side, because that is what the writer declares and what
+    # `icons.identify` scales the table into. A path that states neither, or states a
+    # rectangle, is not one of ours — and guessing the space would be the tolerance this
+    # deliberately does not have.
+    try:
+        units = int(path.get("w", ""))
+    except ValueError:
+        return ""
+    if units <= 0 or path.get("w") != path.get("h"):
+        return ""
+
+    commands: list[icon_set.Placed] = []
+    for node in path:
+        command = PATH_COMMAND.get(node.tag)
+        if command is None:
+            return ""
+        values: list[int] = []
+        for point in node.findall(f"{{{A_NS}}}pt"):
+            # `int`, not `float`: ST_Coordinate also admits a universal measure like `"1in"`,
+            # and a path written in those was not written here. Refuse rather than parse.
+            try:
+                values.extend((int(point.get("x", "")), int(point.get("y", ""))))
+            except ValueError:
+                return ""
+        if len(values) != icon_set.ARITY[command]:
+            return ""
+        commands.append((command, tuple(values)))
+    return icon_set.identify(icon_set.geometry_key(commands), units)
+
+
 def _geometry(shape: BaseShape, scheme: dict[str, str]) -> Geometry | None:
     """How the file says to draw this shape.
 
@@ -325,6 +395,7 @@ def _geometry(shape: BaseShape, scheme: dict[str, str]) -> Geometry | None:
         flip_h=bool(xfrm is not None and xfrm.get("flipH") == "1"),
         flip_v=bool(xfrm is not None and xfrm.get("flipV") == "1"),
         rotation=(int(xfrm.get("rot", 0)) / 60000) if xfrm is not None else 0.0,
+        icon=_icon_name(sp_pr),
     )
     return geometry if (geometry.visible or geometry.rotation) else None
 
