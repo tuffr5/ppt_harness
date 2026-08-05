@@ -495,12 +495,12 @@ def test_the_picture_swaps_sides_without_leaving_its_row() -> None:
     assert abs(left["media"].y - left["prose"].y) < 0.5, "the two are not on one row"
 
 
-def test_an_inset_picture_is_held_off_the_edges_a_bleed_reaches() -> None:
+def test_an_inset_picture_is_held_off_the_edges_a_full_one_reaches() -> None:
     """A margin, which is what the two words mean — and a margin is geometry, so it is the
     expander's and it is visible before anything is written.
 
     This pins the box the writer is handed; that the *file* then shows two different pictures
-    is `test_bleed_and_inset_reach_the_file_as_different_pictures` in `test_export.py`. Both
+    is `test_full_and_inset_reach_the_file_as_different_pictures` in `test_export.py`. Both
     halves are needed: the expander drew this distinction correctly for as long as `inset`
     has existed, and the writer placed no picture at all, so the pair was identical to the
     recipient while the geometry test passed.
@@ -510,9 +510,9 @@ def test_an_inset_picture_is_held_off_the_edges_a_bleed_reaches() -> None:
                                        variant=variant, slots={"media": {"asset_id": "a"}})])
         return _slot_of(slide, "media").box
 
-    bleed, inset = media("bleed"), media("inset")
-    assert inset.x > bleed.x and inset.y > bleed.y
-    assert inset.w < bleed.w and inset.h < bleed.h
+    full, inset = media("full"), media("inset")
+    assert inset.x > full.x and inset.y > full.y
+    assert inset.w < full.w and inset.h < full.h
 
 
 @pytest.mark.parametrize("aspect", [0.25, 1.0, 1.6, 4.0])

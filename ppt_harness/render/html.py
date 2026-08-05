@@ -295,7 +295,7 @@ def _media_html(laid_out: LaidOutSlot, value: Any, src: str | None) -> str:
     The box is the slot's, shrunk by `media_scale` about its centre — the same
     `Box.scaled` the writer calls — and the picture is letterboxed inside it by the
     stylesheet. The preview is the file rendered, and a media slot the preview left blank is
-    how `image_full/bleed` and `image_full/inset` came to look identical in *both*.
+    how `image_full/full` and `image_full/inset` came to look identical in *both*.
     """
     box = laid_out.box.scaled(overrides.media_factor(laid_out.overrides))
     geom = (f'left:{box.x:.2f}px; top:{box.y:.2f}px; '

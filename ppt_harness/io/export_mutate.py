@@ -662,7 +662,7 @@ def _write_media(slide, laid_out, value, name: str, theme,
     """A managed `media` slot as a real picture.
 
     This is the slot the writer used to skip, and skipping it was not a small gap: it made
-    `image_full`'s `bleed` and `inset` the same empty frame, left `image_split` unable to put
+    `image_full`'s `full` and `inset` the same empty frame, left `image_split` unable to put
     a picture beside its prose, and so retired both components while the catalog went on
     offering them. Imagery is the largest visual lever the harness has and it was writing
     none of it.

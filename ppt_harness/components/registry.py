@@ -360,10 +360,16 @@ COMPONENTS: dict[str, Component] = {
             "prose": SlotSpec("prose", role="caption", required=False, max_lines=2,
                               height_share=0.14),
         },
-        # A margin, which is what the two words mean: `bleed` gives the picture its whole
+        # A margin, which is what the two words mean: `full` gives the picture its whole
         # region, `inset` holds it off the edges. Neither draws anything — a border here
         # would be the variant restyling the image rather than framing it.
-        variants={"bleed": Variant("bleed"), "inset": Variant("inset", decoration="inset")},
+        #
+        # `full`, not `bleed`. A bleed runs off the edge of the page, and this one cannot:
+        # the region stops at the theme margin, and every derived box staying inside the
+        # content box is an invariant with a test behind it. Reaching the slide edge would
+        # be a change to the region, not to the variant — so the variant is named for what
+        # it does. A catalog that overstates is the bug this component already had once.
+        variants={"full": Variant("full"), "inset": Variant("inset", decoration="inset")},
     ),
     "image_split": Component(
         key="image_split",

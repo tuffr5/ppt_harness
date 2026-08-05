@@ -56,7 +56,7 @@ def _add(session: Session, path: Path, **extra) -> dict:
 
 def _place_media(session: Session, key: str, alt: str = "A blue rectangle") -> None:
     assert router.dispatch(session, "add_slide", {"layout": "stack", "blocks": [
-        {"region": "body", "component": "image_full", "variant": "bleed",
+        {"region": "body", "component": "image_full", "variant": "full",
          "slots": {"media": {"asset_id": key, "alt": alt}}}]})["ok"]
 
 

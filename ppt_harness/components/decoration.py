@@ -2,7 +2,7 @@
 
 Some variants differ from their siblings in what they *draw* rather than in how they arrange
 things, and the catalog had a row of pairs that differed only in a name: `stat_row` flat and
-carded, `comparison` split and table, `data_table` plain and zebra, `image_full` bleed and
+carded, `comparison` split and table, `data_table` plain and zebra, `image_full` full and
 inset all expanded to the same boxes and exported the same shapes. The catalog was promising
 a rendering nothing produced, which is worse than not offering it — a model that asks for
 `carded` is told it got one.

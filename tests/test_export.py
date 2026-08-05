@@ -433,7 +433,7 @@ SIBLINGS = [
     ("data_table", "plain", "zebra", {"tabular": GRID}),
     ("image_split", "image_left", "image_right",
      {"media": MEDIA, "prose": "What the picture shows"}),
-    ("image_full", "bleed", "inset", {"media": MEDIA}),
+    ("image_full", "full", "inset", {"media": MEDIA}),
 ]
 
 
@@ -448,7 +448,7 @@ def test_variants_the_catalog_offers_reach_the_file_as_different_slides(
     asked for `carded` was told it got one and shipped `flat`. On the file, because the file
     is what the recipient opens.
 
-    `image_full` is here because it was the worst of them: `bleed` and `inset` differ only in
+    `image_full` is here because it was the worst of them: `full` and `inset` differ only in
     a margin around a picture, and the writer placed no picture at all, so the two variants
     were the same *empty* slide.
     """
@@ -483,7 +483,7 @@ def test_a_media_slot_puts_a_real_picture_in_the_file(blank: Session,
     reach and `add_image` has refused a picture without one since it shipped.
     """
     payload = _with_asset(blank)
-    _place(blank, "image_full", "bleed", {"media": payload})
+    _place(blank, "image_full", "full", {"media": payload})
     out = tmp_path / "media.pptx"
     report = export(blank.deck, out, assets=blank.assets)
 
@@ -502,7 +502,7 @@ def test_a_picture_keeps_its_proportions_and_stays_inside_its_box(blank: Session
     somebody's photograph is the point.
     """
     payload = _with_asset(blank, size=(400, 100))  # far wider than any slot box
-    _place(blank, "image_full", "bleed", {"media": payload})
+    _place(blank, "image_full", "full", {"media": payload})
     out = tmp_path / "aspect.pptx"
     export(blank.deck, out, assets=blank.assets)
 
@@ -516,7 +516,7 @@ def test_a_picture_keeps_its_proportions_and_stays_inside_its_box(blank: Session
     assert picture.top + picture.height <= box[1] + box[3] + 1
 
 
-def test_bleed_and_inset_reach_the_file_as_different_pictures(blank: Session,
+def test_full_and_inset_reach_the_file_as_different_pictures(blank: Session,
                                                               tmp_path: Path) -> None:
     """A margin, which is what the two words mean, and it has to be visible in the file.
 
@@ -525,15 +525,15 @@ def test_bleed_and_inset_reach_the_file_as_different_pictures(blank: Session,
     inside, on every edge — "different" would also be satisfied by a picture that moved.
     """
     payload = _with_asset(blank)
-    _place(blank, "image_full", "bleed", {"media": payload})
+    _place(blank, "image_full", "full", {"media": payload})
     _place(blank, "image_full", "inset", {"media": payload})
-    out = tmp_path / "bleed-inset.pptx"
+    out = tmp_path / "full-inset.pptx"
     export(blank.deck, out, assets=blank.assets)
 
     one, two = list(Presentation(str(out)).slides)[:2]
-    bleed, inset = _picture(one), _picture(two)
-    assert inset.width < bleed.width and inset.height < bleed.height
-    assert bleed.left < inset.left and bleed.top < inset.top
+    full, inset = _picture(one), _picture(two)
+    assert inset.width < full.width and inset.height < full.height
+    assert full.left < inset.left and full.top < inset.top
 
 
 def test_media_scale_shrinks_the_picture_without_moving_it(blank: Session,
@@ -544,7 +544,7 @@ def test_media_scale_shrinks_the_picture_without_moving_it(blank: Session,
     not one pushed into a corner.
     """
     payload = _with_asset(blank)
-    _place(blank, "image_full", "bleed", {"media": payload})
+    _place(blank, "image_full", "full", {"media": payload})
     block = blank.deck.slides[0].blocks[0]
     assert router.dispatch(blank, "set_override", {
         "slide_id": blank.deck.slides[0].id, "block_id": block.id,
@@ -571,7 +571,7 @@ def test_a_media_slot_whose_asset_is_behind_nothing_is_reported(blank: Session,
     and the export report is where that has to be said. Nothing is invented in its place: a
     placeholder rectangle would be a shape the managed slide never had.
     """
-    _place(blank, "image_full", "bleed",
+    _place(blank, "image_full", "full",
            {"media": {"asset_id": "nothing-is-here.png", "alt": "A photograph"}})
     report = export(blank.deck, tmp_path / "missing.pptx", strict=False,
                     assets=blank.assets)
@@ -595,7 +595,7 @@ def test_a_media_slot_must_name_a_picture_and_describe_it(blank: Session, payloa
     possible failure — the alternative is `ok` now and a missing picture at export.
     """
     result = router.dispatch(blank, "add_slide", {"layout": "stack", "blocks": [
-        {"region": "body", "component": "image_full", "variant": "bleed",
+        {"region": "body", "component": "image_full", "variant": "full",
          "slots": {"media": payload}}]})
     assert result["ok"] is False
     assert result["error"] == error
@@ -605,14 +605,14 @@ def test_the_preview_draws_the_picture_the_file_gets(blank: Session,
                                                      tmp_path: Path) -> None:
     """Preview equals export, which is the invariant everything else here is measured on.
 
-    A media slot the preview left blank is how `bleed` and `inset` managed to look identical
+    A media slot the preview left blank is how `full` and `inset` managed to look identical
     in *both*: the two disagreed with each other about nothing, because neither drew
     anything. The rectangle is checked, not just the presence of an `<img>` — the preview
     holds the slot box shrunk by `media_scale` and lets `object-fit: contain` letterbox
     inside it, which is the writer's `Box.fit` expressed in CSS.
     """
     payload = _with_asset(blank)
-    _place(blank, "image_full", "bleed", {"media": payload})
+    _place(blank, "image_full", "full", {"media": payload})
     slide = blank.deck.slides[0]
 
     markup = blank.render_html(slide.id)
