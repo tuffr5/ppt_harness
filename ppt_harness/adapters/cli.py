@@ -27,6 +27,17 @@ def cli() -> None:
     load_env()
 
 
+def _export_failure(result: dict) -> str:
+    """Why an export refused, in the shape `export` actually returns.
+
+    A refused export reports `violations` — the fidelity assertions that did not hold — and
+    carries no `message`, so reading one blindly turns a list of real, specific faults into a
+    KeyError that names none of them.
+    """
+    violations = result.get("violations") or []
+    return result.get("message") or "; ".join(violations) or "export failed for no stated reason"
+
+
 @cli.command()
 @click.argument("path", type=click.Path(path_type=Path))
 @click.option("--title", default="Untitled", help="Deck title, and the title slide's text.")
@@ -82,7 +93,7 @@ def new(path: Path, title: str, borrow: Path | None, builtin: str | None,
 
     result = router.dispatch(session, "export", {"path": str(path)})
     if not result["ok"]:
-        raise click.ClickException(result["message"])
+        raise click.ClickException(_export_failure(result))
 
     canvas = session.theme.grid.canvas
     origin = (f" borrowing the theme from {borrow.name}" if borrow
@@ -93,6 +104,85 @@ def new(path: Path, title: str, borrow: Path | None, builtin: str | None,
         click.echo(click.style("  theme warnings: " + "; ".join(session.theme_problems),
                                fg="yellow"))
     click.echo("  add slides with `ppt-harness serve` — that is the part that needs a model")
+
+
+@cli.command()
+@click.argument("brief")
+@click.argument("path", type=click.Path(path_type=Path))
+@click.option("--template", "builtin", default=None,
+              help="A theme that ships with the harness; `ppt-harness templates` lists them.")
+@click.option("--from", "borrow", type=click.Path(exists=True, path_type=Path),
+              help="Take the theme from this deck — palette, fonts, grid.")
+@click.option("--slides", default=8, show_default=True, help="How many slides to aim for.")
+@click.option("--model", default=None, help="Override PPT_HARNESS_MODEL for this run.")
+@click.option("--force", is_flag=True, help="Overwrite an existing file.")
+@click.option("--quiet", is_flag=True, help="Only the result line.")
+def generate(brief: str, path: Path, builtin: str | None, borrow: Path | None,
+             slides: int, model: str | None, force: bool, quiet: bool) -> None:
+    """Write a whole deck from a brief. The one command here that needs a model.
+
+    Everything else in this CLI is offline and deterministic; this is `serve`'s turn loop
+    without the browser, for a script or a benchmark that wants a finished file rather than
+    a conversation. The agent, the mode gate, the budget and the repair ladder are the same
+    ones the chat client uses — nothing here is a second, looser path to a slide.
+
+    The deck is linted and reviewed before it is written, and both reports are printed. A
+    lint failure is not fatal: the file is still exported, because a deck you can open and
+    fix beats an error message about a deck you cannot see.
+    """
+    from ..core.loop import run_once
+    from ..state import templates as builtins
+
+    if path.exists() and not force:
+        raise click.ClickException(f"{path} exists; pass --force to overwrite it")
+    if borrow and builtin:
+        raise click.ClickException(
+            "--from borrows a deck's theme and --template names a built-in one; pick one")
+
+    try:
+        session = (Session.from_template(borrow, brief[:60]) if borrow
+                   else Session.from_builtin(builtin, brief[:60]) if builtin
+                   else Session.blank(brief[:60]))
+    except builtins.TemplateError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    # The slide count is a target rather than a rule: the model is told what the deck is for
+    # and roughly how long, and the catalog decides what each slide can hold. Naming an exact
+    # count tends to produce padding on a thin brief.
+    prompt = (f"{brief}\n\nBuild the whole deck now — around {slides} slides. Open with a "
+              "title slide and close with the one sentence the audience should leave with. "
+              "Vary the components; a deck of nothing but bullet lists is a failure.")
+
+    events = run_once(session, prompt, **({"model": model} if model else {}))
+    calls = sum(1 for e in events if e.kind == "tool_call")
+    refused = sum(1 for e in events if e.kind == "tool_result" and not e.result.get("ok", True))
+    for event in events:
+        if event.kind == "error":
+            click.echo(click.style(f"  {event.text}", fg="yellow"), err=True)
+
+    if not session.deck.slides:
+        raise click.ClickException(
+            f"the model wrote no slides in {calls} tool call(s). Check the key and model in "
+            "`.env`, or run `ppt-harness serve` to see the conversation.")
+
+    lint_report = router.dispatch(session, "lint")
+    review_report = router.dispatch(session, "review_deck")
+    result = router.dispatch(session, "export", {"path": str(path)})
+    if not result["ok"]:
+        raise click.ClickException(_export_failure(result))
+
+    click.echo(f"{path}  ·  {len(session.deck.slides)} slide(s)  ·  "
+               f"{calls} tool call(s), {refused} refused")
+    if quiet:
+        return
+    problems = lint_report.get("problems") or []
+    click.echo(click.style("  lint: clean", fg="green") if not problems
+               else click.style(f"  lint: {len(problems)} problem(s) — "
+                                "`ppt-harness lint` for detail", fg="yellow"))
+    findings = review_report.get("findings") or []
+    click.echo(click.style("  review: nothing to say", fg="green") if not findings
+               else click.style(f"  review: {len(findings)} finding(s) — "
+                                "`ppt-harness review` for detail", fg="yellow"))
 
 
 @cli.command()
@@ -443,17 +533,29 @@ def bench_run(suite: str, out: Path, limit: int | None, only: tuple[str, ...],
         if result.error:
             click.echo(f"      {result.error}")
         else:
+            friction = (result.measurements or {}).get("friction", {})
+            # Tokens only when someone counted them — a scripted or silent endpoint should
+            # not be reported as having run the task for free.
+            spent = f" · {friction['tokens']:,} tokens" if friction.get("tokens") else ""
             click.echo(f"      {fit.get('slides', 0)} slides · fit "
                        f"{fit.get('fit_rate', 0):.2f} · "
-                       f"{(result.measurements or {}).get('friction', {}).get('seconds', 0)}s")
+                       f"{friction.get('seconds', 0)}s{spent}")
 
     path = report_lib.write(results, out / suite, suite=suite,
                             model=results[0].model if results else "")
     card = report_lib.score(results)
+    scored = card.as_dict()
     click.echo("")
     click.echo(f"{card.met}/{card.tasks} met the brief · fit rate "
                + click.style(f"{card.fit_rate:.3f}", fg="green" if card.fit_rate == 1 else "yellow")
                + f" over {card.slides} slides · {card.refusals} refused writes")
+    if scored["tokens"]:
+        per_slide = scored["tokens_per_landed_slide"]
+        cached = scored["cache_hit_rate"]
+        click.echo(f"{scored['tokens']:,} tokens · "
+                   f"{'—' if per_slide is None else format(per_slide, ',.0f')} per slide · "
+                   f"{'no cache figure' if cached is None else f'{cached:.0%}'} "
+                   "of the prompt off the cache")
     click.echo(f"{path.parent}/scorecard.md")
 
 
