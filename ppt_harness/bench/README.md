@@ -7,6 +7,8 @@ uv run ppt-harness bench suites                       # what ships
 uv run ppt-harness bench run --suite core             # the expensive half: needs a model
 uv run ppt-harness bench run --suite core --limit 3 --template slate
 uv run ppt-harness bench corpus ~/govdocs1/pptx       # the free half: needs nothing
+uv run ppt-harness bench score deck.pptx              # PPTEval-style: needs a vision model
+uv run ppt-harness bench score deck.pptx --verify-only  # the model-free checks alone
 uv run ppt-harness bench submit --to presentbench     # hand artifacts to a public benchmark
 uv run ppt-harness bench slidesbench --repo <clone>   # score against SlidesBench's evaluator
 ```
@@ -20,10 +22,68 @@ violations, parts lost on a round trip. Deterministic: no judge, no key for the 
 the same answer twice. This is the half that can sit in CI, and it is the half no public
 presentation benchmark has.
 
-**Judged** — `bench submit`. Whether a deck is any *good* is a question a model answers, and
-the public benchmarks already do it well. Nothing here re-implements or vendors one: the
-adapters write our decks into the layout each benchmark's own scripts expect and print the
-command. Their judge stays theirs, which is the only way their number means anything.
+**Judged** — `bench score` here, `bench submit` elsewhere. Whether a deck is any *good* is a
+question a model answers. `bench submit` hands our decks to the public benchmarks in the
+layout their own scripts expect and prints the command — nothing here re-implements or vendors
+one, because their judge staying theirs is the only way their number means anything.
+`bench score` is the one exception and it is a method, not a benchmark: PPTEval's
+describe-then-score procedure, run against our own decks so a visual change can be measured
+before and after instead of argued about.
+
+## `bench score` — PPTEval, run locally
+
+Two model calls per slide per axis, and the split is the method:
+
+1. a **vision** model writes a neutral description of the rendered slide along fixed axes;
+2. a **separate text-only** call scores that description 1-5 against a rubric, and never sees
+   the image.
+
+That decoupling is what the PPTAgent paper (EMNLP 2025) validated against human raters —
+**design r=0.90**, content r=0.70 — and one call asked to look and judge does not reproduce
+it. The slide scored is the real file: it is rendered through `render/preview`, which exports
+through the ordinary exporter and rasterises what a real renderer made of it.
+
+Descriptions are cached on disk under `.harness/ppteval`, keyed on the image bytes, the prompt
+and the model — the three things a description is an answer to. Re-scoring an unchanged deck
+costs text tokens only; an edited slide invalidates itself, because different pixels are a
+different question.
+
+```bash
+export PPT_HARNESS_VISION_MODEL=claude-opus-4-8   # or gpt-4o, or a local VLM via
+                                                  # PPT_HARNESS_VISION_BASE_URL
+export PPT_HARNESS_SCORE_MODEL=deepseek-v4-flash  # optional: the scorer reads prose, so a
+                                                  # cheap text model can do half the job
+uv run ppt-harness bench score deck.pptx --expect-slides 5-12 --expect-script latin
+```
+
+**Without a vision model nothing is scored.** The command prints the deterministic checks,
+names the variable that is missing, and exits non-zero. It never substitutes a default, a zero
+or a midpoint — an unmeasured deck and an ugly deck must not read alike, and a metric that
+cannot tell them apart is worse than no metric.
+
+| Axis | 1-5 means | Human r |
+|---|---|---|
+| `content` | 3 = clear and complete but no visual aids · 5 = images and text complement each other | 0.70 |
+| `design` | 2 = monochrome · 3 = basic colour but no icons, backgrounds, images or shapes · 5 = harmonious and engaging | 0.90 |
+| `coherence` | **not implemented** — see `rubrics.WHY_NO_COHERENCE` | 0.55 |
+
+Coherence is left out deliberately. It is the paper's weakest axis against human raters, and
+its top two levels require a speaker, a date, an institution and acknowledgements — furniture
+that would make a board update *worse*. Rewriting the levels would ship an unvalidated rubric
+wearing a validated one's reputation. What is reported instead is the deck-level half of
+`core/review.py` — `weak_close`, `duplicate_title`, drift — which decides narrative mechanics
+by counting and cannot be wrong about itself.
+
+### The free half of `bench score`
+
+`--verify-only` needs no model, no key and no renderer. It reads the exported `.pptx` and
+checks page count against a range, aspect ratio within 0.1, and the dominant writing system.
+Twenty lines, deterministic, and it catches the embarrassments an LLM judge scores 4/5 without
+noticing: a deck that came out 4:3, or one slide long, or in the wrong script. Reported
+separately from the judged axes, and never averaged into them.
+
+Every check is tri-state. `--expect-slides` omitted means the page count was *not asserted*,
+which is printed as such rather than as a pass.
 
 ## What is measured, and what it is not
 
@@ -35,6 +95,8 @@ command. Their judge stays theirs, which is the only way their number means anyt
 | `violations` | the exported file failed its own writer assertions | how it looks |
 | `parts_lost` | a round trip dropped media, charts, notes or embeddings | that the slides survived *visually* |
 | `review_findings` | the advisory pass had this much to say | that any of it is right |
+| `design` / `content` | what a model says about a described slide, on the paper's rubric | that a human would agree — r=0.90 and 0.70 are correlations, not equalities |
+| `verification` | the file has the page count, shape and script it was meant to | anything about what is on the slides |
 
 A high refusal rate is the interesting one. A refusal is the design working — but if the
 model *cannot predict* what fits, the fix is a component schema, not a better prompt, and
@@ -63,6 +125,14 @@ currently cannot say about itself.
 `PPT_HARNESS_RENDERER` names. Pin it: a judged score carries the engine's line breaking with
 it, so a run against LibreOffice and a run against PowerPoint are not the same experiment.
 | `ppteval` | [PPTAgent](https://github.com/icip-cas/PPTAgent) | a `.pptx` | a language model **and** a vision model |
+
+`submit --to ppteval` and `bench score` are not the same thing and should not be quoted as
+though they were. The adapter hands decks to *their* evaluator, which is the number worth
+publishing. `bench score` re-implements their *method* — the describe-then-score split and the
+content and design rubrics — on our own rendering path, so a visual change can be measured
+between two runs without a public benchmark in the loop. Their prompts, their model choices
+and their coherence axis are not reproduced.
+
 | `slidesbench` | [AutoPresent](https://github.com/para-lost/AutoPresent) | a `.pptx`, or a `.jpg` | reference-free judged; reference-based computed |
 
 `slidesbench` is **wired end to end** — `bench slidesbench` generates a slide per instruction,

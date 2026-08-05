@@ -633,6 +633,146 @@ def bench_slidesbench(repo: Path, domain: str, limit: int, variant: str,
     click.echo(f"\n{out}/slidesbench.json")
 
 
+def _aspect(value: str) -> float | None:
+    """`16:9`, `4:3`, `1.778` or `none`. A ratio people say out loud, not one they look up."""
+    text = (value or "").strip().lower()
+    if text in ("none", "off", ""):
+        return None
+    if ":" in text:
+        left, _, right = text.partition(":")
+        try:
+            return float(left) / float(right)
+        except (ValueError, ZeroDivisionError) as exc:
+            raise click.ClickException(f"--expect-aspect {value!r} is not a ratio") from exc
+    try:
+        return float(text)
+    except ValueError as exc:
+        raise click.ClickException(f"--expect-aspect {value!r} is not a ratio") from exc
+
+
+def _range(value: str | None) -> tuple[int, int] | None:
+    """`8` or `5-12`. Absent means the check is not asserted, not that it passed."""
+    if not value:
+        return None
+    low, _, high = value.partition("-")
+    try:
+        return (int(low), int(high or low))
+    except ValueError as exc:
+        raise click.ClickException(f"--expect-slides {value!r} is not a count or a range") from exc
+
+
+def _cell(score: object) -> str:
+    return "—" if score is None else str(score)
+
+
+def _check_line(name: str, measured: object, expected: str | None) -> None:
+    """One verification row. "not asserted" is printed, never implied — a check nobody asked
+    for did not pass, and a blank column would read as though it had."""
+    click.echo(f"  {name:<8} {measured!s:<12} "
+               + (f"expected {expected}" if expected else "not asserted"))
+
+
+@bench.command(name="score")
+@click.argument("deck", type=click.Path(exists=True, path_type=Path))
+@click.option("--axis", "axes", multiple=True, type=click.Choice(["content", "design"]),
+              help="Judged axes; default both.")
+@click.option("--model", default=None,
+              help="Vision model that describes each slide; default $PPT_HARNESS_VISION_MODEL.")
+@click.option("--base-url", default=None, help="OpenAI-compatible endpoint for the describer.")
+@click.option("--score-model", default=None,
+              help="Text model that scores the descriptions; default the vision model.")
+@click.option("--width", default=1280, show_default=True, help="Render width, in pixels.")
+@click.option("--expect-slides", default=None, help="A count or a range, e.g. 5-12.")
+@click.option("--expect-aspect", default="16:9", show_default=True,
+              help="Expected aspect ratio, within 0.1. `none` to skip the check.")
+@click.option("--expect-script", default=None,
+              type=click.Choice(["latin", "han", "kana", "hangul"]),
+              help="Writing system the deck should be in.")
+@click.option("--verify-only", is_flag=True, help="Only the checks that need no model.")
+@click.option("--out", type=click.Path(path_type=Path), default=None, help="Write the JSON here.")
+def bench_score(deck: Path, axes: tuple[str, ...], model: str | None, base_url: str | None,
+                score_model: str | None, width: int, expect_slides: str | None,
+                expect_aspect: str, expect_script: str | None, verify_only: bool,
+                out: Path | None) -> None:
+    """Score a deck's slides PPTEval-style: describe with a vision model, then score the words.
+
+    Two halves, and the first one always runs. `verification` is deterministic — page count,
+    aspect ratio, writing system, read off the file itself. The judged half renders each slide
+    through the real export path and needs a vision model; without one it reports what is
+    missing and exits, because a fabricated score is worse than no score.
+    """
+    import json as json_lib
+
+    from ..bench import quality, vision
+
+    try:
+        session = Session.open(deck)
+    except Exception as exc:   # a file that will not open is a fact, not a traceback
+        raise click.ClickException(f"could not open {deck}: {type(exc).__name__}: {exc}") from exc
+    checks = quality.verify(deck, expected_pages=_range(expect_slides),
+                            expected_aspect=_aspect(expect_aspect),
+                            expected_script=expect_script)
+
+    pages = checks.expected_pages
+    click.echo(f"{deck}  ·  {len(session.deck.slides)} slide(s)")
+    click.echo("\nverification  (no model involved)")
+    _check_line("slides", checks.pages, f"{pages[0]}-{pages[1]}" if pages else None)
+    _check_line("aspect", checks.aspect,
+                None if checks.expected_aspect is None
+                else f"{round(checks.expected_aspect, 3)} ±{quality.ASPECT_TOLERANCE}")
+    _check_line("script", checks.script or "undetermined", checks.expected_script)
+    for problem in checks.problems:
+        click.echo(click.style(f"  ! {problem}", fg="red"))
+    if checks.passed:
+        click.echo(click.style(f"  {checks.asserted} check(s) passed", fg="green"))
+
+    scored = None
+    failure = ""
+    if not verify_only:
+        try:
+            judge = vision.build(model, base_url=base_url, score_model=score_model)
+            scored = quality.measure_quality(
+                session, judge, width=width,
+                axes=tuple(axes) or ("content", "design"))
+        except (vision.VisionUnavailable, quality.PreviewUnavailable) as exc:
+            failure = str(exc)
+
+    if scored is not None:
+        payload = scored.as_dict()
+        names = sorted({a for s in scored.slides for a in s.axes})
+        click.echo(f"\nquality  ·  describe {scored.judge['describe_model']} · "
+                   f"score {scored.judge['score_model']}")
+        click.echo("  slide            " + "  ".join(f"{n:<9}" for n in names))
+        for slide in scored.slides:
+            cells = "  ".join(f"{_cell(slide.axes[n].score if n in slide.axes else None):<9}"
+                              for n in names)
+            click.echo(f"  {slide.slide_id:<16} {cells}")
+        for name in names:
+            got, total = payload["scored_slides"][name]
+            mean = payload["means"][name]
+            click.echo(f"  mean {name:<11} "
+                       + ("not measured on any slide" if mean is None
+                          else f"{mean}  over {got}/{total} slide(s)  "
+                               f"(human r={payload['human_correlation'].get(name)})"))
+        for line in scored.unmeasured:
+            click.echo(click.style(f"  ! {line}", fg="yellow"))
+        if scored.structure:
+            click.echo("  structure  " + ", ".join(f"{k}={v}"
+                                                   for k, v in sorted(scored.structure.items()))
+                       + "   (deck-level review findings; coherence is not scored — see "
+                         "bench/rubrics.py)")
+        if out:
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(json_lib.dumps(payload, indent=1), encoding="utf-8")
+            click.echo(f"  {out}")
+    elif not verify_only:
+        click.echo("")
+        raise click.ClickException(
+            f"the judged axes were NOT measured: {failure}\n"
+            "Nothing was scored and no default was substituted. `--verify-only` runs the "
+            "deterministic checks above without a model.")
+
+
 @bench.command(name="publish")
 @click.option("--from", "source", type=click.Path(exists=True, path_type=Path),
               default=Path(".harness/bench"), help="Where the runs are.")
