@@ -151,7 +151,7 @@ def main() -> int:
         try:
             res = managed.add_slide(session, layout=spec["layout"], blocks=spec["blocks"],
                                     notes=spec["notes"])
-        except Exception as exc:                      # noqa: BLE001 - report and keep going
+        except Exception as exc:                      # report and keep going
             print(f"slide {n:2}  FAILED  {type(exc).__name__}: {exc}")
             continue
         print(f"slide {n:2}  ok  {spec['layout']:14} {res['target']}")
