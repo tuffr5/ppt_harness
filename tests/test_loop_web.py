@@ -849,6 +849,27 @@ def test_a_choice_made_at_the_command_line_is_not_asked_again(make, why: str) ->
     assert client.get("/api/templates").json()["started"] is True, why
 
 
+def test_starting_a_deck_gives_you_something_to_look_at() -> None:
+    """The picker answered a question with an empty stage.
+
+    Choosing a theme with nothing on screen afterwards — no preview, no slide list — leaves
+    the person unable to see the thing they just chose, when the theme *is* the whole content
+    of the choice. `new` has opened a deck with a title slide since it shipped; this is the
+    same deck reached through a card.
+    """
+    client = TestClient(create_app(Session.blank("Untitled")))
+    outline = client.post("/api/start",
+                          json={"template": "slate", "title": "Q3 board review"}).json()
+
+    assert len(outline["slides"]) == 1, "a chosen theme left nothing on screen"
+    assert outline["deck"] == "Q3 board review"
+    slide = outline["slides"][0]
+    assert slide["mode"] == "managed"
+    assert "Q3 board review" in (slide.get("gist") or "")
+    # And it has to survive the round trip to the pane that actually renders it.
+    assert client.get(f"/api/slide/{slide['id']}").status_code == 200
+
+
 def test_starting_over_swaps_the_deck_the_whole_app_is_looking_at() -> None:
     """`nonlocal` reaches every route's closure at once, so nothing keeps serving the old
     deck — the outline, the theme and the preview version all have to move together."""

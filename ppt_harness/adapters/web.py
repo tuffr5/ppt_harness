@@ -340,6 +340,15 @@ def create_app(session: Session, *, model: str | None = None,
             session = Session.from_builtin(body.template, body.title or "Untitled")
         except templates.TemplateError as exc:
             raise HTTPException(404, str(exc)) from exc
+        # A title slide, the way `new` has always opened a deck. Without one the picker
+        # answered a question with an empty stage: no preview, no slide list, nothing to
+        # look at, and the person who just chose a theme cannot see what they chose. The
+        # theme is the whole content of the choice, so the first slide has to show it.
+        router.dispatch(session, "add_slide", {
+            "layout": "title",
+            "blocks": [{"region": "hero", "component": "title_slide", "variant": "centered",
+                        "slots": {"title": session.deck.title}}],
+        })
         cache = preview.PreviewCache(session)
         state["agent"] = Agent(session, **agent_kw)
         state["chosen"] = True
