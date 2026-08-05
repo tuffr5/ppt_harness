@@ -36,8 +36,13 @@ def cache(imported: Session):
     modal nobody is there to click — which surfaces as a bare "PowerPoint got an error".
     One directory for everything means one grant, ever.
 
-    Sharing it with a running server is safe: renders are serialised by a file lock, and
-    the cache is keyed by deck content, so the worst case is a redundant conversion.
+    Sharing it with a running server — or with a second copy of this suite — is safe: the
+    cache is keyed by deck content, and every step that *destroys* a file in here holds the
+    renderer lock, so the worst case is a redundant conversion. That was not always true.
+    `_sweep` used to run unlocked and deleted whatever `.pptx` had no `.pdf` beside it,
+    which is exactly what a conversion in flight looks like from another process; two runs
+    at once therefore killed each other's renders. Anything added here must keep the rule:
+    assert about the versions this session made, never about the contents of the directory.
     """
     made = preview.PreviewCache(imported, root=preview.cache_root() / "preview")
     yield made
@@ -214,18 +219,78 @@ def test_rendering_never_creates_a_new_directory(cache, imported: Session) -> No
 @needs_renderer
 def test_old_renders_are_pruned(cache, imported: Session) -> None:
     """Keeping every generation fills a disk with copies of a 174 MB deck; keeping none
-    makes undo — one keystroke — pay for a full re-render."""
+    makes undo — one keystroke — pay for a full re-render.
+
+    Counted over the versions *this* session made, not over the directory. DESIGN §6.1 puts
+    every process on the project in one cache directory, so a running server or a second
+    test run has renders in here too, and a bare file count would be measuring theirs.
+    """
     from ppt_harness.state.document import Author as A
 
     slide = imported.deck.slides[0]
     shape = next(s for s in slide.shapes if s.text and not s.opaque)
+    mine: list[str] = []
     for n in range(6):
         with imported.transaction(A.USER) as turn:
             imported.store.write(turn, "set_text", f"{slide.id}/{shape.id}",
                                  {"text": f"revision {n}"}, A.USER)
         cache.page(slide.id, width=200)
+        mine.append(cache.version())
 
-    assert len(list(cache.root.glob("*.pdf"))) <= 4
+    survivors = [v for v in mine if (cache.root / f"{v}.pdf").exists()]
+    assert len(survivors) <= 4, "every generation was kept"
+    assert mine[-1] in survivors, "the render just made is the one undo will want back"
+
+
+# --------------------------------------------------------- sharing the directory
+
+
+def test_debris_is_only_swept_while_the_renderer_lock_is_held(cache, monkeypatch) -> None:
+    """A `.pptx` with no `.pdf` is debris *or* a conversion another process is in the
+    middle of — the two are identical on disk, and DESIGN §6.1's one shared directory means
+    both are ordinary. The renderer lock is what tells them apart, so the sweep has to take
+    it; without it the sweep deleted the deck the other process was converting.
+    """
+    import contextlib as ctx
+    import os
+
+    held: list[bool] = []
+    real = reference.exclusive
+
+    @ctx.contextmanager
+    def watched():
+        with real():
+            held.append(True)
+            yield
+
+    monkeypatch.setattr(reference, "exclusive", watched)
+
+    # Named for this process, so a concurrent run's sweep is not what removes it.
+    debris = cache.root / f"{os.getpid():016x}.pptx"
+    debris.touch()
+    cache._sweep()
+
+    assert held, "the sweep ran without the renderer lock"
+    assert not debris.exists(), "a finished deck with no PDF is still debris"
+
+
+def test_adopting_a_render_counts_as_using_it(cache) -> None:
+    """`_prune` keeps the most recently *used* renders. While it kept the most recently
+    *written* ones, a second process serving a version it had adopted from disk had that
+    PDF deleted from under it by the first process's next prune."""
+    import os
+    import time
+
+    version = f"ad0pt{os.getpid():011x}"
+    pdf = cache.root / f"{version}.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    stale = time.time() - 3600
+    os.utime(pdf, (stale, stale))
+    try:
+        assert cache._adopt(version) is not None
+        assert pdf.stat().st_mtime > stale, "an adopted render still looks stale to prune"
+    finally:
+        pdf.unlink(missing_ok=True)
 
 
 # --------------------------------------------------------------------------- web

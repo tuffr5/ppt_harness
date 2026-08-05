@@ -55,6 +55,17 @@ class PreviewUnavailable(RuntimeError):
     """No renderer is installed, so there is nothing to rasterise."""
 
 
+def _touch(path: Path) -> None:
+    """Mark a cached render as used just now, for `_prune`'s benefit.
+
+    Best effort: the file is in a directory shared with every other process on the project
+    (DESIGN §6.1), so it can legitimately disappear between the decision and the syscall,
+    and a failure to update a timestamp is never worth failing a preview over.
+    """
+    with contextlib.suppress(OSError):
+        os.utime(path, None)
+
+
 @dataclass(frozen=True)
 class Page:
     slide_id: str
@@ -64,20 +75,34 @@ class Page:
 
 
 def _rasterise(pdf: Path, page: int, width: int, out_dir: Path) -> bytes:
-    """One page of a PDF to PNG. Tens of milliseconds — cheap enough to do per request."""
+    """One page of a PDF to PNG. Tens of milliseconds — cheap enough to do per request.
+
+    The image is scratch, and its name says who asked for it. DESIGN §6.1 fixes the *cache*
+    filenames — `{version}.pdf` is the thing adoption keys on, so it has to be predictable —
+    but this file is written, read once and thrown away, and a predictable name for it is
+    shared state with no owner: two harness processes on the same project, or two web
+    requests for the same page at the same width, would be writing the file the other is
+    reading. That surfaces as a truncated PNG, which blames the rasteriser rather than the
+    timing. Process and thread in the name make the collision impossible; the leading dot
+    keeps it out of the `*.pdf`/`*.pptx` globs the cache reasons about.
+    """
     binary = shutil.which("pdftoppm") or shutil.which("pdftocairo")
     if binary is None:
         raise PreviewUnavailable("no PDF rasteriser: install poppler (`brew install poppler`)")
-    prefix = out_dir / f"{pdf.stem}-p{page}-{width}"
-    subprocess.run(
-        [binary, "-png", "-f", str(page), "-l", str(page), "-singlefile",
-         "-scale-to-x", str(width), "-scale-to-y", "-1", str(pdf), str(prefix)],
-        capture_output=True, check=True, timeout=120,
-    )
+    prefix = out_dir / (f".{pdf.stem}-p{page}-{width}"
+                        f"-{os.getpid()}-{threading.get_ident()}")
     produced = prefix.with_suffix(".png")
-    if not produced.exists():
-        raise PreviewUnavailable(f"page {page} produced no image")
-    return produced.read_bytes()
+    try:
+        subprocess.run(
+            [binary, "-png", "-f", str(page), "-l", str(page), "-singlefile",
+             "-scale-to-x", str(width), "-scale-to-y", "-1", str(pdf), str(prefix)],
+            capture_output=True, check=True, timeout=120,
+        )
+        if not produced.exists():
+            raise PreviewUnavailable(f"page {page} produced no image")
+        return produced.read_bytes()
+    finally:
+        produced.unlink(missing_ok=True)
 
 
 class PreviewCache:
@@ -113,15 +138,27 @@ class PreviewCache:
     # -- rendering --------------------------------------------------------------
 
     def _sweep(self) -> None:
-        """Drop renders that never finished.
+        """Drop renders that never finished. **Only ever with the renderer lock held.**
 
         A `.pptx` with no `.pdf` beside it is the debris of an interrupted conversion, and
         reading one back produces a zlib error rather than anything actionable.
+
+        It is also, byte for byte, what a conversion *in progress* looks like: `_render`
+        writes the deck, then spends a second or so turning it into a PDF, and DESIGN §6.1
+        gives every process on the project that one directory to do it in. Sweeping without
+        the lock therefore deleted the deck another harness — or another test run — was
+        mid-render on, which came back as a bare PowerPoint `-9074`, or as the scratch file
+        vanishing between the exporter writing it and reading it back to check fidelity.
+        Holding `exclusive()` is the only thing that distinguishes debris from work: nobody
+        else can be between the write and the conversion while we have it.
+
+        Reentrant, so the caller that already holds the lock pays nothing for asking again.
         """
-        for deck in self.root.glob("*.pptx"):
-            if not deck.with_suffix(".pdf").exists():
-                with contextlib.suppress(OSError):
-                    deck.unlink()
+        with reference.exclusive():
+            for deck in self.root.glob("*.pptx"):
+                if not deck.with_suffix(".pdf").exists():
+                    with contextlib.suppress(OSError):
+                        deck.unlink()
 
     def _adopt(self, current: str) -> tuple[Path, int] | None:
         """Reuse a render left on disk by an earlier process.
@@ -129,11 +166,18 @@ class PreviewCache:
         The filename *is* the version, so restarting the server — or opening the same deck
         in a second process — costs nothing. Without this, every restart drives the renderer
         again for a file that is already correct.
+
+        Adopting counts as *using* the render, so the timestamp is refreshed. `_prune` keeps
+        the newest generations, and "newest" used to mean most recently converted — so a
+        second process serving a version it had adopted from disk had that PDF deleted out
+        from under it by the first process's next prune. Recency of use is what the pruning
+        rule was describing all along; recency of conversion only coincided with it while a
+        single process was the only one here.
         """
         pdf = self.root / f"{current}.pdf"
         if not pdf.exists():
-            self._sweep()
             return None
+        _touch(pdf)
         self._version, self._pdf = current, pdf
         self._pages = reference.page_count(pdf)
         return pdf, self._pages
@@ -143,6 +187,10 @@ class PreviewCache:
         current = self.version()
         with self._lock:
             if self._version == current and self._pdf and self._pdf.exists():
+                # Serving from memory is still using the file — see `_adopt`. A long-lived
+                # server would otherwise never touch it again and let a second process
+                # prune the render it is answering every request with.
+                _touch(self._pdf)
                 return self._pdf, self._pages
 
             adopted = self._adopt(current)
@@ -163,6 +211,14 @@ class PreviewCache:
             # one is still reading it — which surfaces as "PowerPoint can't read", a
             # message that blames the file rather than the timing.
             with reference.exclusive():
+                # Waiting for the lock can take a whole conversion, and the process we
+                # waited for may have been converting *this* version — same deck state,
+                # same filename. Looking again is a `stat`; not looking is a second spent
+                # producing a file that is already on disk.
+                adopted = self._adopt(current)
+                if adopted is not None:
+                    return adopted
+                self._sweep()
                 return self._render(current, deck_path, pdf_path)
 
     def _render(self, current: str, deck_path: Path, pdf_path: Path) -> tuple[Path, int]:
@@ -189,11 +245,16 @@ class PreviewCache:
         return pdf_path, self._pages
 
     def _prune(self, keep: str, generations: int = 3) -> None:
-        """Drop old renders, newest first.
+        """Drop least-recently-used renders.
 
         Undo is one keystroke, so the render a user just left is very likely the one they
         are about to want again. Keeping a few generations makes undo instant; keeping all
         of them fills a disk with copies of a 174 MB deck.
+
+        "Recently used" and not "recently written" — `_touch` is what makes the difference,
+        and it matters because this deletes files belonging to whoever else has the project
+        open. Called from `_render`, so the renderer lock is held: no other process can be
+        between writing a deck and converting it while this runs.
         """
         pdfs = sorted(self.root.glob("*.pdf"), key=lambda p: p.stat().st_mtime, reverse=True)
         for stale in pdfs[generations:]:
