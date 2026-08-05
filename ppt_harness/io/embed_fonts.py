@@ -168,6 +168,18 @@ def embed(path: Path | str, theme, deck=None) -> EmbedReport:
     listing = _font_list(part._element)
 
     for family in families:
+        # Already embedded, so there is nothing to do — and doing it anyway is not merely
+        # wasteful, it *grows the file every time*. `_attach` mints the next free
+        # `fontN.fntdata` unconditionally while `_declare` returns early for a family
+        # already listed, so a second pass left a part nothing referenced: a deck exported,
+        # reopened and exported again gained ~28 kB of orphaned typeface per trip,
+        # unbounded, with the declaration count never moving off two.
+        #
+        # It hid because `families_in_use` keeps only faces installed on *this* machine, and
+        # re-import rewrites a theme's stack to CJK fallbacks — so it appeared only when the
+        # theme's primary face was one the exporting machine actually had.
+        if _declared(listing, family):
+            continue
         allowed, why = may_embed(family)
         if not allowed:
             report.skipped[family] = why
@@ -226,14 +238,26 @@ def _attach(part, payload: bytes) -> str:
     return part.relate_to(font_part, RELTYPE)
 
 
+def _declared(listing, family: str) -> bool:
+    """Whether `presentation.xml` already names this face.
+
+    The question `embed` has to ask *before* attaching bytes rather than after. It reads the
+    package that is on disk, so it answers for a deck this process exported a moment ago and
+    for one somebody else embedded a year ago alike.
+    """
+    for entry in listing.findall(f"{{{P_NS}}}embeddedFont"):
+        font = entry.find(f"{{{P_NS}}}font")
+        if font is not None and font.get("typeface") == family:
+            return True
+    return False
+
+
 def _declare(listing, family: str, rel_id: str) -> None:
     """Name the face in `presentation.xml` so PowerPoint knows to use the embedded bytes."""
     from lxml import etree
 
-    for entry in listing.findall(f"{{{P_NS}}}embeddedFont"):
-        font = entry.find(f"{{{P_NS}}}font")
-        if font is not None and font.get("typeface") == family:
-            return
+    if _declared(listing, family):
+        return
 
     entry = etree.SubElement(listing, f"{{{P_NS}}}embeddedFont")
     etree.SubElement(entry, f"{{{P_NS}}}font").set("typeface", family)

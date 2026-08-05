@@ -217,3 +217,37 @@ def test_adopting_a_managed_slide_is_refused(generated: Session) -> None:
                              {"slide_id": generated.deck.slides[0].id})
     assert result["ok"] is False
     assert result["error"] == "wrong_mode"
+
+
+def test_re_exporting_does_not_accrete_font_parts(generated: Session,
+                                                  tmp_path: Path) -> None:
+    """A deck exported, reopened and exported again used to gain a typeface every trip.
+
+    `_attach` minted the next free `fontN.fntdata` unconditionally while `_declare` returned
+    early for a family already listed, so the second pass left a part nothing referenced —
+    ~28 kB of orphaned font per round trip, unbounded, with the declaration count never
+    moving. Measured here rather than reasoned about, because the arithmetic that hid it is
+    exactly the arithmetic that would hide it again: the growth only appears when the
+    theme's primary face is installed on the exporting machine, which is why it survived
+    three round-trip suites that all happened to use a theme whose primary was not.
+
+    Asserted on both counts. Parts alone would pass if the declarations grew instead, and a
+    file that is stable in size while quietly re-declaring a face is its own bug.
+    """
+    sizes, parts, declared = [], [], []
+    session, out = generated, tmp_path / "trip0.pptx"
+    for trip in range(4):
+        if trip:
+            session = Session.open(out)
+            out = tmp_path / f"trip{trip}.pptx"
+        exporter.export(session.deck, out, strict=False, assets=session.store.assets)
+        with zipfile.ZipFile(out) as bundle:
+            parts.append(len([n for n in bundle.namelist()
+                              if n.startswith("ppt/fonts/")]))
+            declared.append(bundle.read("ppt/presentation.xml").decode()
+                            .count("embeddedFont>"))
+        sizes.append(out.stat().st_size)
+
+    assert len(set(parts)) == 1, f"font parts grew across round trips: {parts}"
+    assert len(set(declared)) == 1, f"font declarations grew: {declared}"
+    assert max(sizes) - min(sizes) < 2048, f"the file grew across round trips: {sizes}"
