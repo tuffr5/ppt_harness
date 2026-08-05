@@ -21,6 +21,7 @@ uv run playwright install chromium   # optional; only the test-time oracle needs
 
 uv run ppt-harness new     deck.pptx  # an empty themed deck; --from borrows a theme
 uv run ppt-harness serve   deck.pptx  # chat + live preview at localhost:8000
+uv run ppt-harness generate "a deck about X" out.pptx   # the one command that needs a model
 uv run ppt-harness outline deck.pptx  # slides, modes, gists
 uv run ppt-harness theme   deck.pptx  # palette and type, and what had to be guessed
 uv run ppt-harness lint    deck.pptx  # overflow, measured not eyeballed
@@ -38,8 +39,9 @@ uv run ppt-harness export  deck.pptx out.pptx
 
 ### Starting from nothing
 
-Every command above takes an existing deck, and `new` only creates an empty one — writing
-slides needs a model, and the rest of the CLI is deliberately offline and deterministic. So
+Every other command above takes an existing deck, and `new` only creates an empty one. Two
+commands write slides, and both need a model — `generate` for a finished file and `serve`
+for a conversation; the rest of the CLI is deliberately offline and deterministic. So
 `serve` with no argument is the way in:
 
 ```bash
@@ -47,6 +49,19 @@ uv run ppt-harness serve                      # blank deck, chat, Export when yo
 uv run ppt-harness serve --from company-template.pptx --title "Q3 board review"
 uv run ppt-harness serve --template slate     # a theme that ships with the harness
 uv run ppt-harness new brand-new.pptx --from company-template.pptx
+```
+
+On `serve` with no deck the browser offers the four built-in themes as a picker, each card a
+real slide rendered on that theme rather than a swatch — the preview is the export, so the
+honest thumbnail costs nothing but the render.
+
+`generate` is the same turn loop without the browser, for a script or a benchmark that wants
+a finished file rather than a conversation. It runs the same mode gate, budget and repair
+ladder the chat client does, then lints and reviews before writing:
+
+```bash
+uv run ppt-harness generate "Q3 board review: growth, churn, and the hiring plan" \
+    out.pptx --template slate --slides 8
 ```
 
 `--from` reads the other deck's palette, faces and canvas size without copying a single
@@ -192,7 +207,7 @@ discards it.
 
 ## Tools
 
-56, gated by mode. `ppt-harness tools` prints the current set.
+58, gated by mode. `ppt-harness tools` prints the current set.
 
 | | |
 |---|---|
@@ -203,6 +218,7 @@ discards it.
 | Geometry | `align` `distribute` `nudge` `snap_to_grid` `match_size` `set_frame` `fit_box_to_text` |
 | Objects | `add_table` `add_chart` `set_cell` `set_chart_data` |
 | Data | `load_data` `list_datasets` `query_data` |
+| Assets | `add_asset` `list_assets` |
 | Deck | `duplicate_slide` `delete_slide` `hide_slide` `reorder` `set_layout` `set_slide_size` `adopt_slide` `eject_slide` `restyle` `set_theme_role` |
 | History | `undo` `redo` `export` `remember_preference` |
 
@@ -250,6 +266,7 @@ Subpackages have no `__init__.py` — they are namespace packages.
 ```bash
 uv run ppt-harness bench run --suite core        # 12 briefs through the real agent loop
 uv run ppt-harness bench corpus ~/govdocs1/pptx  # round-trip real decks — no model at all
+uv run ppt-harness bench score deck.pptx         # PPTEval's design rubric, describe then score
 uv run ppt-harness bench submit --to ppteval     # hand the same decks to a public benchmark
 ```
 
@@ -266,6 +283,18 @@ The measured half exists because none of those benchmarks checks whether text fi
 an edited file survived being edited — the two things this harness is actually for. Details,
 including which public metric is a poor fit for a component-based system and why, in
 [ppt_harness/bench/README.md](ppt_harness/bench/README.md).
+
+`bench score` runs PPTEval's rubric locally: a vision model describes a rendered slide, a
+separate text-only call scores that description, and the scorer never sees the image — the
+split is what earns the paper's human correlation. It needs a model that can actually read
+an image (`PPT_HARNESS_VISION_MODEL`), and **nothing is substituted when there is not one**:
+the deterministic checks still print, the judged axes are named as unmeasured, and the
+command exits non-zero. An unmeasured deck and a badly-designed one must not read alike.
+
+Read the number as a *delta* between two runs of the same deck, never as a grade. The rubric
+turns 3 into 4 on the presence of icons, backgrounds and shapes, which is a fair question to
+ask of a generator and an unfair one to ask of a harness whose whole design is that the model
+cannot choose a colour or a position.
 
 ## The demo
 
