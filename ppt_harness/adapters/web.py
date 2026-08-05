@@ -320,6 +320,21 @@ def create_app(session: Session, *, model: str | None = None,
         return Response(cached.read_bytes(), media_type="image/png",
                         headers={"Cache-Control": "max-age=86400"})
 
+    @app.post("/api/start/skip")
+    def skip_start() -> dict[str, Any]:
+        """Decline the picker without choosing anything.
+
+        Declining is an answer, so it is recorded like one — otherwise the overlay returns on
+        every reload, and it covers the whole window, chat included. A modal with no way out
+        that reappears when you escape it is not a prompt, it is a wall.
+
+        The deck stays as it was: whatever `serve` opened, which is a blank one on the
+        default theme. `set_theme_role` and a later restart both remain available, so nothing
+        here is a decision the person cannot revisit.
+        """
+        state["chosen"] = True
+        return {"ok": True, "chosen": True}
+
     @app.post("/api/start")
     def start(body: Start) -> dict[str, Any]:
         """Begin a new deck on a chosen theme, discarding the current one.
@@ -462,6 +477,13 @@ PAGE = r"""<!doctype html>
     display:block; width:100%; aspect-ratio:16/9; object-fit:cover;
     background:var(--bg); border-bottom:1px solid var(--line);
   }
+  /* A way out that is visible before you need it. The overlay covers the chat, so a person
+     who wants to type rather than choose has to be able to say so. */
+  #skip {
+    display:block; margin:18px auto 0; padding:8px 14px; border:1px solid var(--line);
+    border-radius:8px; background:none; color:var(--muted); font:inherit; cursor:pointer;
+  }
+  #skip:hover, #skip:focus-visible { color:var(--ink); border-color:var(--accent); }
   .card .name { display:block; padding:12px 14px 0; font-weight:650; }
   .card .desc {
     display:block; padding:4px 14px 0; color:var(--muted); font-size:12.5px;
@@ -600,6 +622,7 @@ PAGE = r"""<!doctype html>
     <p class="lead">Pick a theme to work on. Nothing is written until you ask for a slide —
       and <code>serve --from company.pptx</code> borrows your own instead of any of these.</p>
     <div id="cards"></div>
+    <button type="button" id="skip">Skip — keep the blank deck and just start talking</button>
   </div>
 </div>
 <script>
@@ -893,6 +916,19 @@ async function offerStart() {
     };
     cards.append(card);
   }
+  // Three ways out, because the overlay covers the chat and a prompt you cannot leave is a
+  // wall. Declining is recorded server-side so it does not return on the next reload.
+  const dismiss = async () => {
+    $('#start').hidden = true;
+    $('#prompt').focus();
+    await fetch('/api/start/skip', {method: 'POST'});
+  };
+  $('#skip').onclick = dismiss;
+  $('#start').onclick = e => { if (e.target === $('#start')) dismiss(); };
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && !$('#start').hidden) dismiss();
+  });
+
   $('#start').hidden = false;
   return true;
 }

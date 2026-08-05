@@ -849,6 +849,23 @@ def test_a_choice_made_at_the_command_line_is_not_asked_again(make, why: str) ->
     assert client.get("/api/templates").json()["started"] is True, why
 
 
+def test_declining_the_picker_is_an_answer_too() -> None:
+    """The overlay covers the whole window, chat included.
+
+    With no way out except choosing, somebody who wanted to type rather than pick had a wall
+    rather than a prompt — and one that came back on every reload, because declining was not
+    recorded anywhere. It is recorded now, and the deck is left exactly as `serve` opened it.
+    """
+    client = TestClient(create_app(Session.blank("Untitled")))
+    assert client.get("/api/templates").json()["started"] is False
+
+    assert client.post("/api/start/skip").json()["ok"] is True
+    assert client.get("/api/templates").json()["started"] is True, \
+        "the overlay would return on the next reload"
+    assert client.get("/api/outline").json()["slides"] == [], \
+        "declining should not have built anything"
+
+
 def test_starting_a_deck_gives_you_something_to_look_at() -> None:
     """The picker answered a question with an empty stage.
 
