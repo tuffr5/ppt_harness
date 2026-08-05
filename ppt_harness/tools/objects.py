@@ -11,6 +11,10 @@ Two commitments worth naming:
   never degrades one into an image, and there is no path back if it did.
 - **Alt text is required, not optional.** A deck that cannot be read aloud is a deck part of
   the audience cannot use, and the moment to supply it is the moment the picture is added.
+- **A picture is read, not referenced.** `add_image` ingests the file into the deck's assets
+  (`tools/assets_.py`) and the shape names the key. A deck whose content is a path on the
+  machine that built it is a deck that shows an empty box the moment it is opened anywhere
+  else, and the preview — which draws from the store — could not show it either.
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ from ..components import registry
 from ..core.session import Session
 from ..render import expand
 from ..state.document import Author, ChartSpec, Mode, Shape, Slide, TableSpec
+from . import assets_
 from .base import Diff, ToolError, integer, obj, string, tool
 
 REGIONS = sorted({name for frame in registry.LAYOUTS.values() for name in frame.regions})
@@ -34,7 +39,10 @@ CHART_KINDS = ("bar", "column", "line", "pie")
 MAX_COLUMNS = 8
 MAX_ROWS = 20
 
-IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".webp"}
+# What counts as an image is no longer a set of suffixes here. `tools/assets_.read_image`
+# decides it from the bytes, because a `.png` that is really a JPEG is an ordinary thing on
+# a laptop full of downloads and a package that declares the wrong content type is one
+# PowerPoint offers to repair rather than open.
 
 
 def _freeform(session: Session, slide_id: str) -> Slide:
@@ -83,24 +91,46 @@ def _add(session: Session, slide: Slide, shape: Shape, author: Author) -> None:
       gate="freeform", mutating=True)
 def add_image(session: Session, slide_id: str, region: str, path: str, alt: str,
               author: Author = Author.MODEL) -> dict[str, Any]:
+    """A picture on a slide, and its bytes in the deck.
+
+    The file is **ingested**, not merely pointed at: the same `add_asset` path reads it,
+    validates it by its bytes, dedupes it against what the deck already holds, and files it
+    under a key the shape then names. Two things follow that did not hold when this recorded
+    a path and nothing else.
+
+    First, the preview shows it. `render/html.py` draws `shape.asset` — a store key — and had
+    nothing to draw for a shape carrying only `source`, so a picture added here was in the
+    exported file and absent from every render the model was verifying against. That is
+    precisely the divergence the harness exists to close.
+
+    Second, the deck stops depending on the machine that built it. `source` is still recorded
+    because it is the provenance a later `replace_image` is traced through, and because the
+    writer's own dispatch still keys picture-ness off it — but it is no longer where the
+    picture *is*.
+    """
     slide = _freeform(session, slide_id)
-    source = Path(path).expanduser()
-    if not source.is_file():
-        raise ToolError("no_such_image", f"no file at {source}")
-    if source.suffix.lower() not in IMAGE_SUFFIXES:
-        raise ToolError("unsupported_image",
-                        f"{source.suffix or 'that file'} is not an image PowerPoint reads; "
-                        f"use one of {sorted(IMAGE_SUFFIXES)}")
+    # Alt text before the file is read: it is the check most likely to fail and the cheapest
+    # to run, and refusing after ingesting would mean bytes in the store for a picture no
+    # slide ended up carrying.
     if not alt.strip():
         raise ToolError("alt_required",
                         "alt text is required: a picture with none is invisible to anyone "
                         "using a screen reader")
+    source = Path(path).expanduser()
 
-    shape = _new(session, slide, "picture", region, alt=alt.strip(),
-                 source=str(source.resolve()))
-    _add(session, slide, shape, author)
+    with session.transaction(author) as turn:
+        added = assets_.ingest(session, turn, path, author=author)
+        shape = _new(session, slide, "picture", region, alt=alt.strip(),
+                     asset=added.key, source=str(source.resolve()))
+        session.store.write(turn, "add_shape", f"{slide.id}/{shape.id}",
+                            {"slide_id": slide.id, "index": len(slide.shapes),
+                             "shape": shape.model_dump(mode="json")}, author)
+
+    px_w, px_h = added.probe.px
     return Diff(summary=f"added a picture in {region}", target=f"{slide.id}/{shape.id}",
-                after={"id": shape.id, "alt": alt, "source": shape.source},
+                after={"id": shape.id, "alt": alt, "asset_id": added.key,
+                       "media_type": added.probe.content_type,
+                       "width_px": px_w, "height_px": px_h, "source": shape.source},
                 render=session.measure_slide(slide.id)).as_result()
 
 
@@ -113,18 +143,22 @@ def replace_image(session: Session, shape_id: str, path: str,
     slide, shape = _locate(session, shape_id)
     if shape.type not in ("picture", "media"):
         raise ToolError("not_an_image", f"{shape_id} is a {shape.type}")
-    source = Path(path).expanduser()
-    if not source.is_file():
-        raise ToolError("no_such_image", f"no file at {source}")
 
-    before = shape.source
+    before = {"asset_id": shape.asset, "source": shape.source}
     with session.transaction(author) as turn:
+        # Ingested, then repointed, in one turn — so undo restores the shape's old picture
+        # rather than leaving it naming an asset that a half-undone turn removed. The old
+        # asset is deliberately *not* deleted: another shape or slot may name the same key,
+        # and the store has no reference count to tell.
+        added = assets_.ingest(session, turn, path, author=author)
         session.store.write(turn, "set_props", f"{slide.id}/{shape.id}",
-                            {"source": str(source.resolve())}, author)
+                            {"asset": added.key,
+                             "source": str(Path(path).expanduser().resolve())}, author)
 
     return Diff(summary=f"replaced the picture in {shape_id}",
-                target=f"{slide.id}/{shape.id}", before={"source": before},
-                after={"source": shape.source},
+                target=f"{slide.id}/{shape.id}", before=before,
+                after={"asset_id": shape.asset, "source": shape.source,
+                       "media_type": added.probe.content_type},
                 render=session.measure_slide(slide.id)).as_result()
 
 

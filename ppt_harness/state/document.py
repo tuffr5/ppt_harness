@@ -98,6 +98,14 @@ class Frame(BaseModel):
     cy: int
 
 
+class GradientStop(BaseModel):
+    """One stop of a gradient fill: a resolved colour, where it sits, how opaque it is."""
+
+    at: float
+    colour: str
+    alpha: float = 1.0
+
+
 class Geometry(BaseModel):
     """How a shape is drawn, as the file states it.
 
@@ -115,10 +123,18 @@ class Geometry(BaseModel):
     flip_h: bool = False
     flip_v: bool = False
     rotation: float = 0.0
+    gradient: Literal["", "linear", "radial"] = ""
+    """Which kind of ramp `stops` describes, or empty for a flat fill."""
+    stops: list[GradientStop] = Field(default_factory=list)
+    """The ramp itself. Held here rather than left to the exporter to re-derive because
+    `eject_slide` is one-way: a frozen panel whose gradient had to be looked up again would
+    be a panel that loses its depth the moment the decoration it came from is edited."""
+    gradient_angle: float = 45.0
+    """Degrees clockwise from due east, as OOXML measures them. Ignored by a radial."""
 
     @property
     def visible(self) -> bool:
-        return bool(self.fill or self.line)
+        return bool(self.fill or self.line or self.stops)
 
 
 class ChartSpec(BaseModel):

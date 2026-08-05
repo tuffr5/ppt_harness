@@ -33,7 +33,7 @@ from ..state.document import (
 )
 from ..state.richtext import Run, to_markup
 from ..state.store import DeckStore
-from . import colors
+from . import colors, media
 from .theme_extract import extract_theme
 
 #: Shape types the harness understands well enough to *edit*. Everything else round-trips
@@ -233,7 +233,10 @@ def _autofit_scale(shape: BaseShape) -> float | None:
 
 #: Pictures larger than this are previewed as placeholders. A preview is not a reason to
 #: hold 20 MB of image in memory, and a deck of photographs would otherwise be unbounded.
-MAX_ASSET_BYTES = 8 * 1024 * 1024
+#: Defined in `io/media.py` and re-exported here, because the same number now governs the
+#: other end of the pipe: `add_asset` refuses to ingest what import would have skipped, and
+#: two copies of a limit is how the two ends come to disagree.
+MAX_ASSET_BYTES = media.MAX_ASSET_BYTES
 
 
 def _asset(shape: BaseShape) -> tuple[str, str, bytes] | None:

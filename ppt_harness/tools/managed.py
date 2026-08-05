@@ -98,10 +98,16 @@ def _check_media(component: str, slots: dict[str, Any]) -> None:
 
     Alt text is required for the same reason `add_image` has required it since it shipped —
     a deck that cannot be read aloud is a deck part of the audience cannot use — and the
-    managed path is not a loophole in that. Whether the asset actually resolves is *not*
-    checked: nothing here can see the deck's assets, and a name that turns out to be behind
-    nothing is reported by the exporter as `slot_not_written`, which is where the writer
-    already says what it could not build.
+    managed path is not a loophole in that. Whether the key is behind anything *yet* is not
+    checked: nothing here can see the deck's assets, and authoring the slides before the
+    pictures is an ordinary way to work. A key behind nothing at export time is reported as
+    `slot_not_written`, which is where the writer already says what it could not build.
+
+    A key that is plainly a *path*, though, is refused on sight. It is never a valid key —
+    keys cannot contain a separator — and it is the one mistake the removal of the
+    `asset_id`-as-path fallback (see `io/media.py`) has made silent: it used to work on the
+    machine that wrote it and nowhere else, so a model that learned the habit deserves to be
+    told rather than left to read a violation at export.
     """
     comp = registry.get(component)
     for name, value in slots.items():
@@ -109,12 +115,21 @@ def _check_media(component: str, slots: dict[str, Any]) -> None:
         if spec is None or spec.shape != "media" or not value:
             continue
         payload = value if isinstance(value, dict) else {}
-        if not str(payload.get("asset_id") or "").strip():
+        asset_id = str(payload.get("asset_id") or "").strip()
+        if asset_id and ("/" in asset_id or "\\" in asset_id or asset_id.startswith("~")):
+            raise ToolError(
+                "asset_is_a_path",
+                f"{component}.{name} names {asset_id!r}, which is a path, not an asset key. "
+                "Call add_asset with that path and use the key it returns — a deck has to "
+                "carry its own pictures, or the picture is gone the moment the file is.",
+            )
+        if not asset_id:
             raise ToolError(
                 "media_needs_asset",
                 f"{component}.{name} is a picture slot; it takes "
-                '{"asset_id": ..., "alt": ...}, where asset_id names an image in the deck '
-                "or a path to one",
+                '{"asset_id": ..., "alt": ...}, where asset_id is the key add_asset '
+                "returned. A path is not one: the deck carries its own pictures, so that a "
+                "file mailed to somebody else still has them.",
             )
         if not str(payload.get("alt") or "").strip():
             raise ToolError(

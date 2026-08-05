@@ -23,7 +23,15 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..components import decoration, overrides, registry
-from ..state.document import Block, Geometry, Mode, Shape, Slide, Theme
+from ..state.document import (
+    Block,
+    Geometry,
+    GradientStop,
+    Mode,
+    Shape,
+    Slide,
+    Theme,
+)
 
 #: Below this, the classifier says it does not know rather than guessing.
 MIN_CONFIDENCE = 0.55
@@ -74,8 +82,17 @@ def eject(slide: Slide, theme: Theme, cx: int, cy: int,
 
     canvas_w, canvas_h = theme.grid.canvas
     frozen: list[Shape] = []
+    laid_out_slots = expand.expand_slide(theme, slide)
 
-    for laid_out in expand.expand_slide(theme, slide):
+    # The slide-wide layers first, and once — they are behind everything, and a wash frozen
+    # per slot would be as many washes as the slide has slots.
+    worn = [(item.decoration, item.shape) for item in laid_out_slots if item.decoration]
+    for layer in decoration.slide_layers(theme, worn):
+        box = expand.decoration_box(theme, expand.content_box(theme), layer.place)
+        frozen.append(_frozen_panel(box, layer, theme, canvas_w, canvas_h, cx, cy,
+                                    slide.id))
+
+    for laid_out in laid_out_slots:
         block = slide.block(laid_out.block_id)
         if block is None:
             continue
@@ -92,15 +109,18 @@ def eject(slide: Slide, theme: Theme, cx: int, cy: int,
         # reflow rather than a freeze.
         cells = expand.written_cells(laid_out, value)
         panels = laid_out.panels(len(cells))
-        paint = decoration.paint_for(theme, laid_out.decoration, laid_out.shape)
+        layers = decoration.layers_for(theme, laid_out.decoration, laid_out.shape)
         for index, ((text, cell), panel) in enumerate(zip(cells, panels, strict=True)):
             if not text:
                 continue
             name = f"{laid_out.block_id}_{laid_out.slot}"
             if len(cells) > 1:
                 name = f"{name}_{index}"
-            if paint.visible:
-                frozen.append(_frozen_panel(panel, paint, theme, canvas_w, canvas_h,
+            for layer in layers:
+                if layer.place == "slide":
+                    continue  # frozen once for the slide, above
+                box = expand.decoration_box(theme, panel, layer.place)
+                frozen.append(_frozen_panel(box, layer, theme, canvas_w, canvas_h,
                                             cx, cy, name))
             x, y, w, h = cell.emu(canvas_w, canvas_h, cx, cy)
             frozen.append(Shape(
@@ -118,23 +138,32 @@ def eject(slide: Slide, theme: Theme, cx: int, cy: int,
 
 def _frozen_panel(panel, paint: decoration.Paint, theme: Theme, canvas_w: int,
                   canvas_h: int, cx: int, cy: int, name: str) -> Shape:
-    """One decoration panel as a real autoshape.
+    """One decoration layer as a real autoshape.
 
     A `Geometry`, which is the model's word for "a shape that is drawn" — so the frozen panel
     is the same kind of thing an imported autoshape is, and the preview and the writer that
     already handle those need nothing new. Frozen rather than refused: the alternative is
     telling a model that used `carded` that it may not leave managed mode, and the pressure
     valve exists precisely so that answer is never necessary.
+
+    The gradient is written down here, stop for stop, for the same reason the box is: eject
+    is one-way. A frozen panel that kept only its flat fill would leave managed mode as a
+    grey rectangle where the slide had a lit one, and there would be nothing to compare it
+    against afterwards.
     """
     x, y, w, h = panel.emu(canvas_w, canvas_h, cx, cy)
     return Shape(
-        id=f"{name}_panel",
+        id=f"{name}_{paint.place}",
         ooxml_id=0,
         type="shape",
         frame={"x": x, "y": y, "cx": w, "cy": h},
-        geometry=Geometry(preset="roundRect", fill=paint.fill or None,
+        geometry=Geometry(preset=paint.preset, fill=paint.fill or None,
                           line=paint.line or None,
-                          line_width_pt=decoration.LINE_PX * 0.75),
+                          line_width_pt=decoration.LINE_PX * 0.75,
+                          gradient=paint.kind or "",
+                          gradient_angle=paint.angle,
+                          stops=[GradientStop(at=s.at, colour=s.colour, alpha=s.alpha)
+                                 for s in paint.stops]),
     )
 
 
@@ -169,7 +198,10 @@ def _frozen_picture(laid_out, value, theme: Theme, cx: int, cy: int,
         frame={"x": x, "y": y, "cx": w, "cy": h},
         asset=asset_id,
         alt=alt,
-        source=asset.path,
+        # No `source`. The picture is the deck's asset and has no path on this machine —
+        # it may never have had one — and `_write_ejected` resolves `asset` first for
+        # exactly that reason. A frozen shape carrying a path would make an ejected slide
+        # the one part of the deck whose content lives outside it.
     )]
 
 

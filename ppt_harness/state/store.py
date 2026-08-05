@@ -10,6 +10,7 @@ an op with no inverse cannot be written in the first place.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import Any, ClassVar
@@ -41,7 +42,8 @@ class Locked(StoreError):
 #: op name -> name of the op that undoes it. Absent means it inverts to itself.
 INVERSE_OF = {"add_slide": "delete_slide", "delete_slide": "add_slide",
               "add_shape": "delete_shape", "delete_shape": "add_shape",
-              "add_block": "delete_block", "delete_block": "add_block"}
+              "add_block": "delete_block", "delete_block": "add_block",
+              "add_asset": "delete_asset", "delete_asset": "add_asset"}
 
 
 class DeckStore:
@@ -53,10 +55,19 @@ class DeckStore:
         #: workspace: persistence is a policy the caller opts into, and a store used in a
         #: test or a one-shot CLI call should not touch the filesystem at all.
         self.on_commit: Callable[[Turn], None] | None = None
-        #: key -> (content type, bytes) for pictures pulled out of the package.
-        #: Deliberately *not* on `Deck`: the document model is dumped whole for every
-        #: invertible op, and carrying image bytes through undo would be absurd.
+        #: key -> (content type, bytes) for pictures pulled out of the package, and for
+        #: pictures `add_asset` ingested. Deliberately *not* on `Deck`: the document model is
+        #: dumped whole for every invertible op, and carrying image bytes through undo would
+        #: be absurd.
         self.assets: dict[str, tuple[str, bytes]] = {}
+        #: sha1 -> bytes for every picture this store has been handed, whether or not a key
+        #: currently points at it. The pool is what lets an `add_asset` op be **invertible
+        #: without being enormous**: the op names a digest, the bytes live here, and the log
+        #: — which is appended to `journal.jsonl` verbatim and held in memory for the life of
+        #: the session — carries a 40-character string instead of a megabyte of base64 per
+        #: add. It also survives undo: the bytes stay after the key is removed, so redo has
+        #: something to put back.
+        self._blobs: dict[str, bytes] = {}
 
     # -- transactions -----------------------------------------------------------
 
@@ -396,6 +407,72 @@ class DeckStore:
     def _invert_set_notes(self, target: str, patch: dict[str, Any]) -> dict[str, Any]:
         return {"slide_id": patch["slide_id"],
                 "notes": self.slide(patch["slide_id"]).notes}
+
+    # assets --------------------------------------------------------------------
+
+    def stage_blob(self, blob: bytes) -> str:
+        """Put bytes in the pool and return the digest an op can name them by.
+
+        Called before the write, because the op has to be able to name something that is
+        already there: `_apply_add_asset` runs during the transaction *and* again on redo,
+        and the second time nobody is holding the file.
+        """
+        digest = hashlib.sha1(blob).hexdigest()
+        self._blobs[digest] = blob
+        return digest
+
+    def asset_named(self, digest: str) -> str | None:
+        """The key already holding exactly these bytes, or `None`.
+
+        A linear scan that re-hashes every asset rather than an index kept up to date,
+        because `assets` is assigned wholesale by the importer and updated in place by the
+        workspace — an index maintained here would be stale exactly when it mattered, and a
+        stale answer means the same picture stored twice. Ingesting is a rare, interactive
+        act on a dict of tens of entries; the scan costs milliseconds and cannot be wrong.
+        """
+        for key, (_, blob) in self.assets.items():
+            if hashlib.sha1(blob).hexdigest() == digest:
+                return key
+        return None
+
+    def _asset_blob(self, key: str, digest: str) -> bytes:
+        """The bytes an `add_asset` op refers to.
+
+        The pool first, then whatever is already filed under the key. The second case is a
+        restore: `Workspace` writes assets to disk beside the journal, so a replayed
+        `add_asset` finds its picture already loaded and must not insist on a pool that this
+        process never filled.
+        """
+        blob = self._blobs.get(digest)
+        if blob is not None:
+            return blob
+        found = self.assets.get(key)
+        if found is not None:
+            return found[1]
+        raise StoreError(f"no bytes for asset {key!r} ({digest[:8]}); they were never staged")
+
+    def _apply_add_asset(self, target: str, patch: dict[str, Any]) -> None:
+        self.assets[patch["key"]] = (patch["content_type"],
+                                     self._asset_blob(patch["key"], patch["sha1"]))
+
+    def _invert_add_asset(self, target: str, patch: dict[str, Any]) -> dict[str, Any]:
+        return {"key": patch["key"]}
+
+    def _apply_delete_asset(self, target: str, patch: dict[str, Any]) -> None:
+        found = self.assets.pop(patch["key"], None)
+        if found is not None:
+            # Keep the bytes. This is what undo runs, and a redo immediately after has to be
+            # able to put the same picture back — including after a restore, where the pool
+            # was empty because the bytes came off disk rather than through `stage_blob`.
+            self.stage_blob(found[1])
+
+    def _invert_delete_asset(self, target: str, patch: dict[str, Any]) -> dict[str, Any]:
+        found = self.assets.get(patch["key"])
+        if found is None:
+            raise StoreError(f"no asset {patch['key']!r} to delete")
+        content_type, blob = found
+        return {"key": patch["key"], "content_type": content_type,
+                "sha1": self.stage_blob(blob)}
 
     # object payloads -----------------------------------------------------------
 

@@ -136,8 +136,16 @@ class Workspace:
         Journal first. If the process dies between the two, the next `restore` finds a
         snapshot one turn stale and a journal that knows how to finish the job — the
         opposite order loses the turn entirely.
+
+        Assets are rewritten only when the turn touched them. They used to be written once
+        at `attach` on the grounds that nothing mutates an imported image — true until
+        `add_asset` shipped, after which a picture added mid-session lived only in memory and
+        a restart resumed a deck whose slides named an asset that was no longer there. The
+        op names tell us cheaply, so the common turn still pays nothing.
         """
         self.append(turn)
+        if any(op.op in ("add_asset", "delete_asset") for op in turn.ops):
+            self.save_assets(store)
         self.save_deck(store.deck)
 
     def append(self, turn: Turn) -> None:
@@ -169,12 +177,14 @@ class Workspace:
         }, ensure_ascii=False).encode())
 
     def save_assets(self, store: DeckStore) -> None:
-        """Picture bytes, written once.
+        """Picture bytes, and the index that names them.
 
-        Assets are immutable here — nothing mutates an imported image — so this is a
-        one-time cost at attach rather than per-turn weight on every write.
+        Written at attach and again after any turn that added or removed one. Individual
+        assets are still immutable — a key always holds the same bytes, which is what makes
+        content-addressed keys work — so this rewrites the index and the files it names
+        rather than diffing anything.
         """
-        if not store.assets:
+        if not store.assets and not self.assets_dir.is_dir():
             return
         self.assets_dir.mkdir(parents=True, exist_ok=True)
         index = {}
@@ -264,11 +274,14 @@ class Workspace:
             from ..io.import_pptx import import_pptx
 
             store = import_pptx(source)
+            # Assets before the replay, not after: an `add_asset` op names a digest and
+            # leaves the bytes outside the log, so replaying one finds its picture only if
+            # what was written to `assets/` is already loaded.
+            store.assets.update(self.load_assets())
             for turn in history:
                 for op in turn.ops:
                     store._apply(op)
             store.log.restore(history)
-            store.assets.update(self.load_assets())
             report.update({"from": "journal", "degraded": True,
                            "note": f"no readable snapshot; replayed {len(history)} turns "
                                    "onto the source file"})

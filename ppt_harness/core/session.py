@@ -8,7 +8,6 @@ gives tools a place to stand.
 from __future__ import annotations
 
 import base64
-import mimetypes
 import re
 import uuid
 from pathlib import Path
@@ -242,25 +241,19 @@ class Session:
         Needed wherever the HTML has to stand alone — the measurement pass loads it with
         `set_content`, so there is no origin for a relative URL to resolve against.
 
-        A key nothing is behind is tried as a path on disk, because the exporter does the
-        same (`io/media.resolve`) and a generated deck has no other way to name a picture:
-        nothing ingests bytes into the store, so a `media` slot on a deck the harness built
-        always names a file. Without this the preview would show a placeholder for a picture
-        the exported file actually has, and preview-equals-export is the invariant everything
-        else here is measured against.
+        The store, and only the store — the same question `io/media.resolve` answers for the
+        exporter, answered the same way. It used to fall back to reading the key as a path on
+        disk, because nothing ingested bytes and a `media` slot on a generated deck could
+        only name a file; `add_asset` is what removed the need, and keeping the fallback
+        would mean the preview showing a picture the recipient of the .pptx will not have.
+        Preview-equals-export is the invariant everything else here is measured against, and
+        it has to hold in the direction that flatters the harness least.
         """
         found = self.assets.get(key)
-        if found is not None:
-            content_type, blob = found
-            return f"data:{content_type};base64,{base64.b64encode(blob).decode()}"
-
-        path = Path(key).expanduser() if key else None
-        if path is None or not path.is_file():
+        if found is None:
             return None
-        guessed, _ = mimetypes.guess_type(path.name)
-        blob = path.read_bytes()
-        return (f"data:{guessed or 'application/octet-stream'};base64,"
-                f"{base64.b64encode(blob).decode()}")
+        content_type, blob = found
+        return f"data:{content_type};base64,{base64.b64encode(blob).decode()}"
 
     def render_html(self, slide_id: str, *, inline_assets: bool = True,
                     asset_url: str = "/api/asset", for_display: bool = True) -> str:
@@ -277,15 +270,11 @@ class Session:
             src = self.asset_data_uri
         else:
             def src(key: str) -> str | None:
-                # A store asset gets the endpoint, which is the whole point of this branch.
-                # A `media` slot naming a *file* has nothing to serve — the endpoint reads
-                # `session.assets` — so it falls back to being inlined rather than being
-                # dropped: a picture the exported file has and the preview does not is the
-                # divergence this module exists to prevent, and it costs one image on a page
-                # that is otherwise still small.
-                if key in self.assets:
-                    return f"{asset_url}/{key}"
-                return self.asset_data_uri(key)
+                # Every picture is a store asset now, so every picture has an endpoint. A key
+                # behind nothing gets None and the renderer draws its named placeholder —
+                # which is the honest answer, and the same one the exporter gives by
+                # reporting `slot_not_written`.
+                return f"{asset_url}/{key}" if key in self.assets else None
         return renderer.render_slide(self.theme, slide, cx, cy, asset_src=src,
                                      compensate_autofit=for_display).html
 

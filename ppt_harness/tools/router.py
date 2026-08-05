@@ -18,6 +18,7 @@ from ..io.export_mutate import ExportError
 from ..state.document import Mode
 from ..state.store import Locked, StoreError
 from . import (  # noqa: F401  -- import registers the tools
+    assets_,
     constraints,
     data,
     deck,
