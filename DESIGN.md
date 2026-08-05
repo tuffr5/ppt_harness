@@ -196,24 +196,36 @@ slides still need it — their colors are the original author's.
 
 ## 3. Component catalog
 
-| Key | Slot shapes | Variants | Degrades to |
+| Key | Slots | Variants | Degrades to |
 |---|---|---|---|
-| `title_slide` | title, prose? | left, centered, image-bg | — |
-| `section_break` | title, prose? | bar, full-bleed | — |
-| `slide_title` | title | plain, with-kicker | — |
-| `agenda` | list | list, two-col | `bullets` |
-| `bullets` | title?, list | plain, lead-in | split slide |
-| `stat_row` | list | flat, carded | 2-row → `card_grid` |
-| `card_grid` | title?, list | 1×3, 2×2, 2×3 | `bullets` |
-| `icon_row` | title?, list | icon-top, icon-left | `card_grid` |
-| `timeline` | title?, list | horizontal, vertical | `bullets` |
-| `comparison` | title?, list×2 | split, table | — |
+| `title_slide` | title, prose? | left, centered, **washed** | — |
+| `slide_title` | title | plain | — |
+| `bullets` | items | plain, two_col | — |
+| `agenda` | items | list, two_col | `bullets` |
+| `stat_row` | items | flat, **carded**, **raised**, two_row | `card_grid` |
+| `card_grid` | title?, items | 1x3, 2x2, 2x3, **raised** | `bullets` |
+| `icon_row` | title?, items | **icon_top**, **icon_left** | `card_grid` |
+| `timeline` | title?, items | horizontal, vertical | `bullets` |
+| `comparison` | title?, left, right | split, **table** | — |
+| `data_table` | tabular, prose? | plain, **zebra** | — |
 | `chart` | chart, prose? | wide, half | — |
-| `data_table` | tabular, prose? | plain, zebra | split slide |
-| `image_full` | media, prose? | bleed, inset | `image_split` |
-| `image_split` | title?, media, prose | image-left, image-right | stack blocks |
-| `quote` | prose, title? | pull, full-bleed | `prose` block |
-| `takeaway` | title, list? | bar, centered | — |
+| `image_full` | media, prose? | full, **inset** | `image_split` |
+| `image_split` | title?, media, prose | image_left, image_right | — |
+| `quote` | prose, title? | pull, full_bleed | — |
+| `takeaway` | title, items? | bar, centered, **staged** | — |
+| `section_break` | title, prose? | bar, centered, **washed** | — |
+
+A **bold** variant draws something beyond its text — a card, a banded table, a dimensional
+panel over a contact shadow, a wash behind the slide, or an icon beside a label. Every one
+resolves through a theme role, so what it draws is the deck's own colour rather than a value
+the catalog chose. `components/decoration.py` holds the resolution; `components/icons.py`
+holds the 145 marks an icon slot may name.
+
+This table is transcribed from `components/registry.py`, which is the only place a variant
+exists. It has been wrong before — for a long while it listed `image-bg`, `with-kicker` and
+`lead-in`, none of which the code has ever had, and named `image_full`'s variants `bleed` and
+`inset` when neither drew anything at all. A model reads these names as a contract, so a
+catalog that overstates is worse than one that is merely incomplete.
 
 **`comparison` is terminal.** It does not degrade to `data_table`: a table holds `tabular`,
 and two `list` slots do not become one without a conversion that would decide for the author

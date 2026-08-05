@@ -252,3 +252,41 @@ def test_the_override_tool_reports_a_clamp(blank: Session) -> None:
     assert result["ok"]
     assert result["clamped_from"] == 99
     assert blank.deck.slide(slide_id).blocks[0].overrides["accent"] == 5
+
+
+def test_the_design_catalog_table_matches_the_registry() -> None:
+    """DESIGN §3's table is a transcription, and transcriptions rot.
+
+    This one had listed `image-bg`, `with-kicker` and `lead-in` — variants the code has never
+    had — while calling `image_full`'s pair `bleed` and `inset` at a time when neither drew
+    anything. A model reads these names as a contract and will ask for what the document
+    offers, so a catalog that overstates fails at the tool gate for a reason the reader was
+    told was legal.
+
+    Compared as sets per component, because the table also carries emphasis and prose that
+    are a document's business rather than the registry's.
+    """
+    import re
+    from pathlib import Path
+
+    from ppt_harness.components import registry
+
+    design = (Path(__file__).resolve().parent.parent / "DESIGN.md").read_text()
+    # Sliced to §3 first: several other tables in this document have the same shape, and a
+    # loose pattern picks up modes, export modes and skill kinds as though they were
+    # components.
+    section = design[design.index("## 3. Component catalog"):]
+    section = section[:section.index("\n\n", section.index("|---"))]
+    rows = re.findall(r"^\| `(\w+)` \| [^|]* \| ([^|]*) \|", section, re.M)
+    documented = {key: {v.strip().strip("*").strip() for v in variants.split(",")}
+                  for key, variants in rows}
+
+    assert set(documented) == set(registry.COMPONENTS), (
+        f"only in DESIGN: {sorted(set(documented) - set(registry.COMPONENTS))}; "
+        f"only in the registry: {sorted(set(registry.COMPONENTS) - set(documented))}"
+    )
+    for key, component in registry.COMPONENTS.items():
+        assert documented[key] == set(component.variants), (
+            f"{key}: DESIGN says {sorted(documented[key])}, "
+            f"the registry has {sorted(component.variants)}"
+        )
