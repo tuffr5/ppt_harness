@@ -452,6 +452,10 @@ PAGE = r"""<!doctype html>
     position:fixed; inset:0; z-index:20; display:grid; place-items:center;
     background:rgba(15,17,21,.94); padding:24px; overflow:auto;
   }
+  /* `display:grid` above outranks the user agent's `[hidden] { display:none }`, so without
+     this the overlay stayed on screen after being dismissed — covering the chat and eating
+     every click, while `.hidden` read true to anything that asked. */
+  #start[hidden] { display:none; }
   #start .sheet { width:min(760px,100%); }
   #start h2 { margin:0 0 6px; font-size:20px; letter-spacing:.2px; }
   #start .lead { margin:0 0 20px; color:var(--muted); max-width:62ch; }
@@ -608,6 +612,7 @@ PAGE = r"""<!doctype html>
     <button class="ghost" id="drawer" title="Show or hide the chat">☰</button>
     <input id="find" type="search" placeholder="Find in deck" autocomplete="off">
     <div id="slides"></div>
+    <button class="ghost" id="theme" title="Start a deck on another theme">Theme</button>
     <button class="ghost" id="probes">Boxes</button>
     <button class="ghost" id="undo">Undo</button>
     <button class="ghost" id="redo">Redo</button>
@@ -887,9 +892,12 @@ $('#export').onclick = async () => {
 // The picker, offered only for a deck with nothing in it. A deck with slides — imported,
 // resumed, or already written into — is one the user has committed to, and replacing it
 // from a card grid is not a choice anybody came here to make.
-async function offerStart() {
+// Build and show the picker. `offerStart` calls this once at boot for a deck nobody has
+// chosen yet; the Theme button calls it any time after, because a choice you cannot revisit
+// is not much of a choice — and dismissing the overlay used to put it permanently out of
+// reach, leaving whoever did so on the default theme with no way back to the others.
+async function showPicker() {
   const data = await (await fetch('/api/templates')).json();
-  if (data.started) return false;
   const cards = $('#cards');
   cards.textContent = '';
   for (const t of data.templates) {
@@ -905,6 +913,13 @@ async function offerStart() {
     shot.onerror = () => shot.remove();
     card.append(shot, el('span', 'name', t.name), el('span', 'desc', t.description));
     card.onclick = async () => {
+      // Starting over is a *new deck*, not a restyle, and it is not undoable — undo is
+      // scoped to a turn within one deck. Cheap to confirm, expensive to get wrong, and
+      // silent only while there is nothing yet to lose.
+      const written = (outline && outline.slides.length) || 0;
+      if (written && !confirm(
+            `Start a new deck on ${t.name}? The ${written} slide${written === 1 ? '' : 's'} ` +
+            `here will be discarded, and this cannot be undone.`)) return;
       card.setAttribute('aria-busy', 'true');
       const res = await fetch('/api/start',
         {method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -932,6 +947,14 @@ async function offerStart() {
   $('#start').hidden = false;
   return true;
 }
+
+async function offerStart() {
+  // Only for a deck nobody has spoken for. Reopening it later is the Theme button's job.
+  if ((await (await fetch('/api/templates')).json()).started) return false;
+  return showPicker();
+}
+
+$('#theme').onclick = showPicker;
 
 // Outline first so the deck is on screen while the model composes; the greeting only for a
 // conversation with nothing in it, since a reload replays the transcript and a hello pasted
