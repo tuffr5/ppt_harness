@@ -106,9 +106,10 @@ disk, gold is cross-cutting.
 | 8 | Respond | Message, diff, updated canvas | loop |
 | 9 | Terminate | Goal met, no errors, cap reached, or signature repeats | loop |
 
-**Only web chat runs all nine.** `core/loop.py` is imported by the web adapter and
-nothing else; the MCP server and the CLI hold a `Session` and the router, and enter at
-stage 4. Under MCP the loop stages still happen — they just belong to the *host's* model,
+**Only web chat runs all nine.** The web adapter is the only *interface* that imports
+`core/loop.py`; the MCP server and the CLI hold a `Session` and the router, and enter at
+stage 4. (`bench/runner.py` imports it too, on purpose — the benchmark drives the real loop,
+because one that stubbed it would be measuring the stub.) Under MCP the loop stages still happen — they just belong to the *host's* model,
 which is why the harness cannot own the context pyramid there. Under the CLI no model is
 involved at all: a human or a script names the tool.
 

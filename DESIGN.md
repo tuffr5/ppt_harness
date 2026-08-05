@@ -82,6 +82,23 @@ what makes mutating export possible (§6.2).
 Regions are column spans on the theme grid. Blocks flow into regions in order; the
 expander owns all geometry.
 
+**Within a block, slots stack unless they declare a width.** A `SlotSpec` carries a
+`width_share` beside its `height_share`, and the expander groups *consecutive* slots into
+horizontal **bands**: a slot joins the band being built while there is still room for its
+share inside 1.0, and otherwise opens the next one. A band is as tall as its tallest member,
+and shares are normalised across the band, so two halves fill the width even after the cell
+gap comes out of it. Declaration order decides adjacency, which keeps the catalog readable —
+`left` then `right` already reads as side by side.
+
+The default `width_share` of 1.0 gives every slot a band to itself, which is exactly the
+stacked layout every component had before bands existed. A component that never mentions
+width is laid out as it always was.
+
+`comparison` is why this exists. Two `list` slots set against each other are only a
+comparison if they are *beside* each other; stacked, the reader sees one list of ten things
+and the opposition is gone. A variant's `per_row` (§3) cannot supply it, because `per_row`
+arranges the items *within* a slot, never the slots themselves.
+
 ### 1.5 Canonical slot shapes
 
 Components declare which shapes they consume. Swaps and degradation chains are legal only
@@ -190,13 +207,17 @@ slides still need it — their colors are the original author's.
 | `card_grid` | title?, list | 1×3, 2×2, 2×3 | `bullets` |
 | `icon_row` | title?, list | icon-top, icon-left | `card_grid` |
 | `timeline` | title?, list | horizontal, vertical | `bullets` |
-| `comparison` | title?, list×2 | split, table | `data_table` |
+| `comparison` | title?, list×2 | split, table | — |
 | `chart` | chart, prose? | wide, half | — |
 | `data_table` | tabular, prose? | plain, zebra | split slide |
 | `image_full` | media, prose? | bleed, inset | `image_split` |
 | `image_split` | title?, media, prose | image-left, image-right | stack blocks |
 | `quote` | prose, title? | pull, full-bleed | `prose` block |
 | `takeaway` | title, list? | bar, centered | — |
+
+**`comparison` is terminal.** It does not degrade to `data_table`: a table holds `tabular`,
+and two `list` slots do not become one without a conversion that would decide for the author
+which column is which.
 
 **Bounded overrides** — `density`, `emphasis`, `align`, `accent`, `media_scale` — each
 clamped to a safe range and theme-derived. These absorb "nudge it" requests so
@@ -809,6 +830,50 @@ geometry manipulation.
 | Preferences | Data, proposed not adopted | Inspectable, correctable, no fine-tuning |
 | Interface | MCP server first | Fastest to usable; defers the client build |
 | Model | LLM sufficient, VLM optional | Correctness is measured; vision buys taste |
+| Topic recipes | Not a skill per template | Frontmatter is flat by design; a fixed sequence is enforceable in code; skills are prompt surface |
+| Visual richness | Decoration layer on components | Fixed per-topic layouts forfeit measurement and the imported-deck path |
+
+### Decided, not built
+
+Neither of these exists yet. They are recorded so the reasoning is not re-derived.
+
+- **A topic recipe — "Fintech pitch", "Q4 review" — is not a skill, and certainly not one
+  skill per topic.** Three things say so. The frontmatter parser is deliberately flat
+  `key: value` with no nesting (`core/skills.py`: "a skill that needed a richer format would
+  be a skill doing too much"), and a recipe is a *nested, ordered* slide sequence. The same
+  docstring sets the bar that "a rule that can be enforced in code does not belong in a
+  skill" — a fixed sequence of components is exactly such a rule. And skills are **prompt
+  surface**: they are listed in the always-on catalog (§8.1) and exposed over MCP as
+  prompts, so a hundred topics would not fit there at any price. What is genuinely a skill
+  is the *procedure* of filling a recipe from a brief, needed once no matter how many
+  recipes exist — and `narrative-arc` already triggers on "before building a deck from a
+  brief". Where the recipe's own data should live is unsettled; see below.
+
+- **Visual richness comes from a decoration layer on components** — fills, outlines and
+  insets, resolved through theme roles — **not from fixed per-topic pixel layouts.** A
+  hard-coded layout per topic forfeits both the measurement guarantee (§3.1, §5.1) and the
+  imported-deck path (§7), which are the two properties a competitor cannot copy without
+  rebuilding the harness. Decoration rides on top of geometry the expander still owns, so it
+  costs neither.
+
+### Open: where a starter outline lives
+
+Two positions are in tension, and this is the owner's call, not a settled decision.
+
+- **Stated today:** a template is a theme. `state/templates.py` — "A template here is a
+  theme, not a `.pptx`" — and it is explicit that "what a template does *not* carry is slide
+  content: a starter outline is a playbook's job (`narrative-arc`), not a palette's". §7.1
+  says the same from the other end: `from_template` brings the palette, the faces and the
+  grid across, and no slide. §9 lists `apply-template` as "rebrand onto a new theme".
+- **The pull the other way:** the market's unit is a *topic* template — one pickable thing
+  bundling a visual identity **and** a slide sequence. Users choose "Fintech Startup Pitch
+  Deck", not a palette; a theme-only template makes them supply the structure themselves.
+
+The tradeoff: bundling makes the first deck much better with one choice, and costs the
+separation that lets any theme apply to any content — including an *extracted* theme, which
+has no outline to bundle and is the case §7 says matters most. Adopting topic templates
+would **reverse** the `templates.py` position and belongs under "Reversed during design"
+when and if someone decides to.
 
 ### Reversed during design
 
