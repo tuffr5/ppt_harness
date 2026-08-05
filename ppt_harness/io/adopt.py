@@ -133,6 +133,23 @@ def eject(slide: Slide, theme: Theme, cx: int, cy: int,
                 align=laid_out.align,
                 type_spec=laid_out.spec,
             ))
+
+        # The marks, after the words, exactly as the writer emits them — and frozen at all
+        # for the reason the panels and the picture are: eject is one-way, so a slide that
+        # left managed mode without its icons would be an `icon_row` with nothing on it and
+        # nothing left to re-derive them from. The accent is written down as a literal here
+        # because there is no block left to resolve a role against once the freeze is done.
+        accent = overrides.accent_for(theme, laid_out.overrides)
+        for index, (icon_name, box) in enumerate(expand.written_icons(laid_out, value)):
+            x, y, w, h = box.emu(canvas_w, canvas_h, cx, cy)
+            frozen.append(Shape(
+                id=f"{laid_out.block_id}_{laid_out.slot}_{index}_icon",
+                ooxml_id=0,
+                type="shape",
+                frame={"x": x, "y": y, "cx": w, "cy": h},
+                geometry=Geometry(icon=icon_name, line=accent,
+                                  line_width_pt=expand.icon_stroke_px(box) * 0.75),
+            ))
     return frozen
 
 

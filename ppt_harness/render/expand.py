@@ -13,10 +13,10 @@ be compared directly instead of through a conversion nobody trusts.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
-from ..components import decoration, overrides, registry
+from ..components import decoration, icons, overrides, registry
 from ..state import slots as slot_render
 from ..state.document import EMU_PER_INCH, Block, Slide, Theme, TypeSpec
 
@@ -27,6 +27,58 @@ BLOCK_GAP = 24
 #: Gap between the cells of a multi-column list. Wider than SLOT_GAP because the eye needs
 #: more separation across a row than down a column to read the cells as separate things.
 CELL_GAP = 20
+
+# ---------------------------------------------------------------- where an icon goes
+#
+# `icon_top` and `icon_left` name a position, and a position is a rectangle, so it is decided
+# here — DESIGN §1.4 again. The numbers are fractions of the *cell*, never of the slide, so a
+# mark in a footer band and one in a hero region are the same mark at two sizes rather than
+# the same number of pixels in two very different boxes.
+#
+# Both shares are capped against the other axis, and that cap is the one doing the work: five
+# cells across a body region are much wider than they are tall, and a mark sized off the
+# height alone would be a postage stamp in the middle of a wide cell — while two cells across
+# are much taller than the label needs, and a mark sized off *that* height would be a picture
+# with a caption. Taking the smaller of the two keeps a square that reads as an icon at every
+# cell aspect the catalog can produce.
+
+#: Space between the mark and the word, in px at 720p. Smaller than CELL_GAP: this separates
+#: two parts of one thing, where CELL_GAP separates one thing from the next.
+ICON_GAP = 8
+
+#: The mark's size against the label's own line height, which is what actually decides
+#: whether the two read as one thing. `icon_top` stands above the word and can carry three
+#: lines' worth; `icon_left` sits beside it and at much more than a line and a half stops
+#: being a mark on a label and becomes a picture with a caption.
+#:
+#: Tied to the type rather than to the cell because the cell is the wrong ruler: `icon_row`
+#: in a `body` region gets a cell five times taller than its label needs, and a mark at a
+#: fraction of *that* is an enormous glyph over a caption. The cell fractions below remain as
+#: the ceiling for the opposite case — a band so short that three lines' worth would not fit.
+ICON_TOP_LINES = 3.0
+ICON_LEFT_LINES = 1.75
+
+#: `icon_top` — the mark stands above the label and is the dominant element of the cell.
+ICON_TOP_HEIGHT = 0.46
+ICON_TOP_WIDTH = 0.60
+
+#: `icon_left` — the mark sits beside the label and must leave the words most of the cell, or
+#: the variant is a picture list rather than a labelled row.
+ICON_LEFT_HEIGHT = 0.62
+ICON_LEFT_WIDTH = 0.24
+
+#: Below this a mark is a smudge rather than a symbol, and the cell is better off with the
+#: word alone — a two-px-tall icon costs the recipient a shape and tells them nothing. In px
+#: at 720p, scaled with the canvas like everything else here.
+ICON_MIN = 12
+
+#: One px of rounding slack, held back from the mark and handed to the words.
+#:
+#: Not superstition. `budget.for_slot` counts *whole* lines off the text box — `int(h / line)`
+#: — so a box that is exactly two lines tall is one float away from being budgeted as one, and
+#: the icon's height is arrived at by subtraction. A px is invisible on the mark and is the
+#: difference between a label that fits and a refusal nobody can act on.
+ICON_SLACK = 1.0
 
 # ------------------------------------------------------- where a decoration's layers go
 #
@@ -182,6 +234,46 @@ class LaidOutSlot:
     the whole point of applying padding in the expander is that the measurer and the writer
     read the same number.
     """
+    icon_place: str = ""
+    """Where each item's mark sits within its cell — `top`, `left`, or empty for none.
+
+    The variant's word, carried rather than looked up again, for the same reason `decoration`
+    is: the writer and the preview must be answering one question, and a second lookup is a
+    second chance to answer it differently.
+    """
+    icon_side: float = 0.0
+    """The side of the square a mark occupies, in canvas px. Square by construction — every
+    icon in the set is drawn in a square view box, and a non-square frame would stretch the
+    artwork rather than place it."""
+    icon_gap: float = 0.0
+    """Space between the mark and the word it labels, in canvas px, already scaled."""
+    icon_offset: float = 0.0
+    """How far down the cell the mark begins, in canvas px.
+
+    Always vertical, for both placements, but it buys two different things. Under `top` it
+    centres the whole mark-and-label group in a cell that is usually far taller than the pair
+    needs. Under `left` it centres the mark against the lines the label may occupy, rather
+    than against the cell — which is where a mark sitting visibly below its own word came
+    from.
+    """
+
+    def _carve(self, cell: Box) -> Box:
+        """What is left of a cell once its mark has taken its side.
+
+        This is the single most important line of the feature: the budget measures
+        `cells()[0]`, so taking the icon's rectangle out *here* is what makes the gate charge
+        a labelled mark for the room it actually leaves the words. Reserving the space at
+        write time instead would have the measurer certify two lines into a box that holds
+        one — the same disagreement between measurement and rendering that the decoration pad
+        exists here to avoid.
+        """
+        if not self.icon_place or self.icon_side <= 0:
+            return cell
+        take = self.icon_side + self.icon_gap
+        if self.icon_place == "top":
+            take += self.icon_offset
+            return Box(x=cell.x, y=cell.y + take, w=cell.w, h=max(1.0, cell.h - take))
+        return Box(x=cell.x + take, y=cell.y, w=max(1.0, cell.w - take), h=cell.h)
 
     def _grid(self, count: int | None = None) -> list[Box]:
         n = max(1, self.items if count is None else count)
@@ -207,7 +299,7 @@ class LaidOutSlot:
         single-pathed.
         """
         pad = self.pad if self.columns > 1 else 0.0
-        return [box.inset(pad) for box in self._grid(count)]
+        return [self._carve(box.inset(pad)) for box in self._grid(count)]
 
     def panels(self, count: int | None = None) -> list[Box]:
         """The rectangle a decoration paints behind each written box.
@@ -220,6 +312,35 @@ class LaidOutSlot:
         if self.columns > 1:
             return self._grid(count)
         return [self.box.inset(-self.pad)]
+
+    def icons(self, count: int | None = None) -> list[Box]:
+        """The square each item's mark is drawn in, row-major and aligned with `cells`.
+
+        Empty for a slot that carries none, so callers iterate a list rather than branch on
+        whether icons exist — the same shape as `panels`, and for the same reason: a writer
+        with a special case for "no decoration" grew one for "no icon" the moment there were
+        two of them.
+
+        Positioned against the *cell*, not the text box: `cells` has already had this square
+        subtracted, so deriving the mark's place from the text would put it back inside the
+        words it was moved out of.
+        """
+        if not self.icon_place or self.icon_side <= 0:
+            return []
+        pad = self.pad if self.columns > 1 else 0.0
+        side = self.icon_side
+        out = []
+        for box in self._grid(count):
+            cell = box.inset(pad)
+            y = cell.y + self.icon_offset
+            if self.icon_place == "top":
+                # Centred across the cell, because `icon_top` centres its label too and a
+                # mark hanging left over centred words reads as a mistake rather than a
+                # choice.
+                out.append(Box(x=cell.x + (cell.w - side) / 2, y=y, w=side, h=side))
+            else:
+                out.append(Box(x=cell.x, y=y, w=side, h=side))
+        return out
 
 
 def written_cells(laid_out: LaidOutSlot, value: Any) -> list[tuple[str, Box]]:
@@ -239,6 +360,74 @@ def written_cells(laid_out: LaidOutSlot, value: Any) -> list[tuple[str, Box]]:
         return [(slot_render.slot_text(value), laid_out.box)]
     parts = [slot_render.slot_text(item) for item in value]
     return list(zip(parts, laid_out.cells(len(parts)), strict=False))
+
+
+def written_icons(laid_out: LaidOutSlot, value: Any) -> list[tuple[str, Box]]:
+    """The mark each item names, with the square it is drawn in. Empty where there are none.
+
+    Beside `written_cells` and matching it item for item, because the two are one answer:
+    the cell the words go in and the square the mark goes in are cut from the same rectangle,
+    and a caller that derived one of them itself would be the second implementation this file
+    exists to prevent. Items without an icon simply contribute nothing, so a list that has
+    been half filled draws the marks it has rather than nothing at all.
+    """
+    if not laid_out.icon_place or not isinstance(value, list):
+        return []
+    boxes = laid_out.icons(len(value))
+    return [(str(item["icon"]), box)
+            for item, box in zip(value, boxes, strict=False)
+            if slot_render.is_icon(item)]
+
+
+def icon_stroke_px(box: Box) -> float:
+    """How thick an icon's line is at the size it is being drawn, in canvas px.
+
+    The set is drawn at two units on a twenty-four unit box, so the weight is a *proportion*
+    of the mark and this converts it once. A width fixed in px would be a hairline on a hero
+    icon and a blot on a footer one; a width the writer computed for itself would be a second
+    copy of this ratio, free to disagree with the preview's.
+    """
+    return max(0.5, box.w * icons.stroke_units() / icons.view_box())
+
+
+def _icon_metrics(laid_out: LaidOutSlot, place: str, gap: float,
+                  scale: float) -> tuple[float, float]:
+    """`(side, offset)` for one slot's marks: how big, and how far down the cell they start.
+
+    Sized against the label's line height first and against the cell only as a ceiling — see
+    the constants above for why the type is the better ruler. `icon_top` carries one further
+    bound the other does not: the mark and the label share the cell's *height*, so it may take
+    no more than leaves the label the lines it would have had without it. Anything else is
+    the mark quietly retiring capacity that the budget — which reads the carved box — then
+    refuses content against. A footer band five cells across gave the words a box shorter
+    than one line of their own type, and every label anyone could write was rejected for
+    overflowing a box the icon had taken.
+
+    The offset is what keeps the pair looking composed rather than jammed against the top of
+    a cell that is much taller than either of them. Text frames are top-anchored throughout
+    the writer, so an unshifted `icon_top` group sat in the top third of a body-region cell
+    with a third of the slide empty beneath it; the group is centred against the room the
+    label could use instead, which puts the whitespace where a designer would.
+    """
+    cell = laid_out._grid()[0].inset(laid_out.pad if laid_out.columns > 1 else 0.0)
+    line = laid_out.spec.line
+    # The height the label may actually claim: its declared line count, or fewer where the
+    # cell cannot hold that many. This is the same number `budget.for_slot` derives from the
+    # carved box, which is why the two never disagree about how much room the words have.
+    keep = min(laid_out.max_lines, max(1, int(cell.h / line))) * line if line else 0.0
+    if place == "top":
+        side = min(line * ICON_TOP_LINES, cell.h * ICON_TOP_HEIGHT, cell.w * ICON_TOP_WIDTH,
+                   cell.h - gap - keep - ICON_SLACK)
+        offset = max(0.0, (cell.h - (side + gap + keep)) / 2)
+    else:
+        side = min(line * ICON_LEFT_LINES, cell.h * ICON_LEFT_HEIGHT,
+                   cell.w * ICON_LEFT_WIDTH)
+        # Centred on the band the *words* occupy, not on the cell: a mark centred in a cell
+        # five times its label's height sits well below the line it belongs to.
+        offset = max(0.0, (min(cell.h, keep) - side) / 2)
+    if side < ICON_MIN * scale:
+        return 0.0, 0.0
+    return side, offset
 
 
 def _beneath(panel: Box, width: float, height: float, sink: float) -> Box:
@@ -408,7 +597,7 @@ def expand_block(theme: Theme, block: Block, box: Box) -> list[LaidOutSlot]:
             # box the text lands in. A row of cells keeps its outer box and is deflated cell
             # by cell instead, because there the decoration is drawn once per cell.
             slot_box = Box(x=x, y=y, w=w, h=h)
-            out.append(
+            laid_out = (
                 LaidOutSlot(
                     block_id=block.id,
                     slot=name,
@@ -428,6 +617,17 @@ def expand_block(theme: Theme, block: Block, box: Box) -> list[LaidOutSlot]:
                     pad=pad,
                 )
             )
+            # The mark is sized from the cell, so the slot has to exist before it can be
+            # measured — hence a second pass rather than an argument. Only a slot that
+            # *declares* icons and a variant that *places* them get one, and only when the
+            # items are laid out as a grid: `written_cells` writes a single-column list as
+            # one text frame, and one frame cannot carry five marks at five positions.
+            if spec.icons and variant.icon and across > 1:
+                gap_px = ICON_GAP * scale
+                side, offset = _icon_metrics(laid_out, variant.icon, gap_px, scale)
+                laid_out = replace(laid_out, icon_place=variant.icon, icon_gap=gap_px,
+                                   icon_side=side, icon_offset=offset)
+            out.append(laid_out)
             x += w + inner_gap
         y += h + gap
     return out

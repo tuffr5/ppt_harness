@@ -44,7 +44,12 @@ build-backend = "setuptools.build_meta"
 # Skills are markdown *data* inside the package, so they need declaring or a wheel ships
 # the loader with nothing to load. Path is relative to the package, which is what the
 # previous `../skills` declaration got wrong.
-ppt_harness = ["skills/**/*.md", "templates/*.json", "bench/suites/*.json"]
+# The icon paths are data for the same reason: a wheel that shipped `components/icons.py`
+# with no `iconset/paths.json` behind it would offer every model an icon slot and refuse
+# every name. The licence and the notice travel with them because MIT requires it.
+ppt_harness = ["skills/**/*.md", "templates/*.json", "bench/suites/*.json",
+               "components/iconset/paths.json", "components/iconset/LICENSE",
+               "components/iconset/NOTICE.md"]
 
 [tool.setuptools.packages.find]
 include = ["ppt_harness*"]

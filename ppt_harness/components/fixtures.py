@@ -48,11 +48,25 @@ FIGURE_ROLES = {"stat"}
 STAT_VALUES = ("$4.2M", "-3.1%", "38%", "2.4x", "9,412", "1.8s")
 STAT_LABELS = ("ARR", "Churn", "Latency", "Growth", "Requests", "p99")
 
+#: Marks for a slot that declares `icons`. Named rather than taken off the front of the set
+#: so the fixture reads as a plausible slide, and because a worst case for an icon is a
+#: *dense* path — `team` and `report` are among the busiest in the vendored subset, which is
+#: what makes them worth writing into a real .pptx in a test.
+ICON_NAMES = ("growth", "team", "revenue", "deadline", "risk", "report")
+
 
 def _value(spec: registry.SlotSpec, script: str) -> Any:
     """The worst case this slot admits, at its own declared bounds."""
     if spec.shape == "list":
         count = spec.max_items or 6
+        if spec.icons:
+            # Real names out of the vendored set, cycled, so the fixture exercises the gate
+            # and the writer rather than only the geometry. A made-up name here would be
+            # refused by `_check_icons`, which is the point — the fixture has to be a payload
+            # a model could legally send.
+            return [{"icon": ICON_NAMES[i % len(ICON_NAMES)],
+                     "label": _text(script, short=True)}
+                    for i in range(count)]
         if spec.role in FIGURE_ROLES:
             return [{"value": STAT_VALUES[i % len(STAT_VALUES)],
                      "label": STAT_LABELS[i % len(STAT_LABELS)]}
@@ -105,7 +119,13 @@ def oversized(key: str, script: str = "latin") -> dict[str, Any]:
     out: dict[str, Any] = {}
     for name, spec in comp.slots.items():
         value = _value(spec, script)
-        if spec.shape == "list" and spec.role in FIGURE_ROLES:
+        if spec.shape == "list" and spec.icons:
+            # The mark stays and the caption grows, for the same reason a stat overflows on
+            # its label: nobody pastes a paragraph where an icon name goes, and stripping the
+            # icon here would have the gate refuse this payload for the wrong reason — the
+            # case under test is a budget that must fire, not a schema that must.
+            out[name] = [{"icon": item["icon"], "label": _text(script)} for item in value]
+        elif spec.shape == "list" and spec.role in FIGURE_ROLES:
             # A figure slot overflows on its caption, not on its number: nobody pastes a
             # paragraph where "$4.2M" goes, but "Annual recurring revenue, net of churn"
             # is exactly what turns up under it.

@@ -25,16 +25,25 @@ nothing.
 from __future__ import annotations
 
 import html as html_escape
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from ..components import decoration, overrides
+from ..components import decoration, icons, overrides
 from ..state import richtext
 from ..state.document import Mode, Slide, Theme
 from ..state.slots import STAT_LABEL_EM, is_stat
 from . import svg
-from .expand import Box, LaidOutSlot, content_box, decoration_box, expand_slide
+from .expand import (
+    Box,
+    LaidOutSlot,
+    content_box,
+    decoration_box,
+    expand_slide,
+    icon_stroke_px,
+    written_icons,
+)
 
 #: Slot elements carry this so the measurement pass can find them without guessing.
 PROBE_ATTR = "data-target"
@@ -213,6 +222,17 @@ html, body {{ margin: 0; padding: 0; background: #6b7280; }}
   display: flex; align-items: center; justify-content: center; text-align: center;
   font: 500 12px/1.3 ui-sans-serif, system-ui, sans-serif; color: rgba(0,0,0,.45);
 }}
+/* An `icon_row` mark. Absolutely placed, in the rectangle `written_icons` gives the
+   exporter, and stroked rather than filled — the same `<a:ln>` on the same open path. No
+   `stroke-width` here: it is an attribute on each element, in view-box units, so the browser
+   scales it with the artwork exactly as PowerPoint scales a line width with its shape. A
+   value in this stylesheet would override that and be a second opinion about the weight. */
+.icon {{
+  position: absolute;
+  fill: none; stroke: currentColor;
+  stroke-linecap: round; stroke-linejoin: round;
+  overflow: visible;
+}}
 """.strip()
 
 
@@ -289,6 +309,55 @@ def _panel_html(box: Box, paint: decoration.Paint) -> str:
             f'border-radius:{radius}"></div>')
 
 
+def _cell_style(laid_out: LaidOutSlot) -> str:
+    """The padding one grid cell spends, so its content box is the exporter's text box.
+
+    Two things come out of the cell before the words do — the decoration's pad, on every
+    side, and the icon's square, on the side the variant puts it. Both are already subtracted
+    in `LaidOutSlot.cells`, which is what the writer and the budget read; here they are spent
+    as padding because `box-sizing: border-box` makes that the identical rectangle while
+    leaving the grid track where the exporter paints its card.
+    """
+    pad = laid_out.pad
+    take = (laid_out.icon_side + laid_out.icon_gap) if laid_out.icon_side else 0.0
+    top = pad + (laid_out.icon_offset + take if laid_out.icon_place == "top" else 0.0)
+    left = pad + (take if laid_out.icon_place == "left" else 0.0)
+    if not (pad or take):
+        return ""
+    return (f' style="padding:{top:.1f}px {pad:.1f}px {pad:.1f}px {left:.1f}px"')
+
+
+def _icons_html(laid_out: LaidOutSlot, value: Any, colour: str) -> str:
+    """Every mark an icon slot draws, in the squares the exporter draws them in.
+
+    The same path string the writer turns into `a:custGeom`, from the same table, positioned
+    by the same `written_icons`. That is the point of normalising the artwork at vendor time:
+    the preview *is* the export rendered, and the only way to keep that true of a curve is for
+    both of them to be reading one list of coordinates rather than two derivations of it.
+
+    Absolutely positioned rather than laid out inside the cell, because the exporter writes
+    the mark as its own shape at its own rectangle — a mark that flowed with the text here
+    would be a preview of a different slide, and the difference would show up exactly where
+    the label wrapped.
+    """
+    marks = []
+    for name, box in written_icons(laid_out, value):
+        path = icons.path(name)
+        if not path:
+            continue
+        marks.append(
+            f'<svg class="icon" viewBox="0 0 {icons.view_box():g} {icons.view_box():g}" '
+            f'style="left:{box.x:.2f}px; top:{box.y:.2f}px; '
+            f'width:{box.w:.2f}px; height:{box.h:.2f}px; color:{colour}" '
+            # Stated in *view-box* units, not px, so the browser scales the stroke with the
+            # artwork exactly as PowerPoint scales `a:ln` with the shape. Both therefore land
+            # on the same weight, and `icon_stroke_px` stays the one place the ratio lives.
+            f'stroke-width="{icon_stroke_px(box) / box.w * icons.view_box():.3f}">'
+            f'<path d="{path}"></path></svg>'
+        )
+    return "".join(marks)
+
+
 def _media_html(laid_out: LaidOutSlot, value: Any, src: str | None) -> str:
     """A managed `media` slot as the picture the exporter writes there.
 
@@ -361,15 +430,32 @@ def _managed_body(theme: Theme, slide: Slide,
         if grid:
             # The pad is the writer's inset, spent as padding rather than as a smaller box:
             # `box-sizing: border-box` makes the two the same content rectangle, and the
-            # grid track stays the cell the exporter paints its card in.
-            style = f' style="padding:{laid_out.pad:.1f}px"' if laid_out.pad else ""
+            # grid track stays the cell the exporter paints its card in. An icon's square is
+            # spent the same way, on the one side it is taken from, so the content rectangle
+            # left over is exactly `LaidOutSlot.cells()` — the box the exporter writes the
+            # text into and the box the budget measured it against.
+            style = _cell_style(laid_out)
             cells = "".join(f'<span class="cell"{style}>{_item_html(item, accent)}</span>'
                             for item in value)
+            across = min(laid_out.columns, len(value))
+            # Rows in **px, from the expander**, not left to the content. A grid whose tracks
+            # size themselves packs its rows against the top of the slot while the exporter
+            # gives each row an equal share of it, so a two-row `card_grid` or `stat_row`
+            # previewed as two rows crowded at the top of a box it filled in the file. The
+            # icons are what made it undeniable — they are placed absolutely, at the
+            # expander's rectangles, so the second row's marks sat a long way below the
+            # second row's words.
+            #
+            # `minmax(track, auto)`, never a flat height: a track that could not grow would
+            # hide overflow, and the browser probe finds overflow precisely by the ink box
+            # growing past the slot.
+            rows = laid_out.panels(len(value))
             inner = (f'<span class="ink grid" style="'
                      f'display:grid;'
-                     f'grid-template-columns:repeat({min(laid_out.columns, len(value))},1fr);'
-                     f'gap:{laid_out.cell_gap:.1f}px;'
-                     f'align-content:center">{cells}</span>')
+                     f'grid-template-columns:repeat({across},1fr);'
+                     f'grid-template-rows:repeat({math.ceil(len(value) / across)},'
+                     f'minmax({rows[0].h:.2f}px,auto));'
+                     f'gap:{laid_out.cell_gap:.1f}px">{cells}</span>')
         else:
             inner = f'<span class="ink">{content}</span>'
 
@@ -378,6 +464,11 @@ def _managed_body(theme: Theme, slide: Slide,
             f'data-max-lines="{laid_out.max_lines}" '
             f'style="{_slot_style(theme, laid_out)}">{inner}</div>'
         )
+        # After the slot, matching the writer's own order — and outside it, because the marks
+        # are positioned on the slide rather than inside the probed element. A shape inside
+        # the probe would be measured as part of the text it labels, and the measurement
+        # contract is about words overflowing a box.
+        parts.append(_icons_html(laid_out, value, accent))
     return "\n".join(parts), targets
 
 
@@ -417,7 +508,20 @@ def _freeform_body(theme: Theme, slide: Slide, cx: int, cy: int,
 
         layers: list[str] = []
 
-        if shape.geometry is not None:
+        if shape.geometry is not None and shape.geometry.icon:
+            # A frozen mark, from `eject_slide`. Drawn from the same path table and at the
+            # same weight the writer gives it, so an ejected `icon_row` previews as the
+            # managed one it came from — which is the only way anyone can check that the
+            # one-way door did not cost them anything.
+            g = shape.geometry
+            layers.append(
+                f'<svg class="icon" style="position:static; width:100%; height:100%; '
+                f'color:{_esc(g.line or theme.palette.get("ink", "#111"))}" '
+                f'viewBox="0 0 {icons.view_box():g} {icons.view_box():g}" '
+                f'stroke-width="{icons.stroke_units():.3f}">'
+                f'<path d="{icons.path(g.icon)}"></path></svg>'
+            )
+        elif shape.geometry is not None:
             g = shape.geometry
             ramp = ((g.gradient, g.gradient_angle,
                      tuple((s.at, s.colour, s.alpha) for s in g.stops))

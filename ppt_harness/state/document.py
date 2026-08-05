@@ -131,10 +131,20 @@ class Geometry(BaseModel):
     be a panel that loses its depth the moment the decoration it came from is edited."""
     gradient_angle: float = 45.0
     """Degrees clockwise from due east, as OOXML measures them. Ignored by a radial."""
+    icon: str = ""
+    """A name out of `components.icons`, when this shape is custom geometry rather than a
+    preset one.
+
+    Here rather than in `preset` because they are answers to different questions: `preset`
+    names a shape OOXML already knows, and this names a path the harness carries. It exists
+    for `eject_slide`, which is one-way — a frozen `icon_row` whose marks were not written
+    down would be a door that quietly costs you every icon on the slide, which is the loss
+    the panels and the picture were already fixed for.
+    """
 
     @property
     def visible(self) -> bool:
-        return bool(self.fill or self.line or self.stops)
+        return bool(self.fill or self.line or self.stops or self.icon)
 
 
 class ChartSpec(BaseModel):

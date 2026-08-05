@@ -10,8 +10,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..components import icons, registry
 from ..components import overrides as overrides_mod
-from ..components import registry
 from ..core.session import Session
 from ..render import budget as budget_mod
 from ..state.document import Author, Block, Mode, Slide
@@ -139,6 +139,50 @@ def _check_media(component: str, slots: dict[str, Any]) -> None:
             )
 
 
+def _check_icons(component: str, slots: dict[str, Any]) -> None:
+    """An icon slot's items name a mark, and a mark the harness actually has. Both, or refuse.
+
+    Same argument as `_check_media` and `_check_structured` above: the write that lands and
+    cannot be drawn is worse than the write that is refused, because the model has been told
+    `ok` and has moved on. Here it is worse still than usual — a bare label on `icon_row`
+    exports as a label, so nothing fails anywhere. `add_slide` succeeds, the budget passes,
+    the export is clean, and the deck quietly contains the component's old bug: a row named
+    for a mark, with no mark on it, and two variants that are then indistinguishable because
+    the only thing that distinguishes them is where the mark goes.
+
+    The refusal quotes the near misses first and the whole set after. A hundred and forty-five
+    names is the complete answer and an unusable one; `growth` for `groth` is the answer a
+    model can act on, and the full list is there for the guess that was not close to anything.
+    """
+    comp = registry.get(component)
+    for name, value in slots.items():
+        spec = comp.slots.get(name)
+        if spec is None or not spec.icons or not value:
+            continue
+        if not isinstance(value, list):
+            continue
+        for item in value:
+            key = str(item.get("icon") or "").strip() if isinstance(item, dict) else ""
+            if not key:
+                raise ToolError(
+                    "icon_required",
+                    f"{component}.{name} takes "
+                    '{"icon": <name>, "label": ...} per item — the icon is the component, '
+                    "not a decoration on it, and an item without one renders as a label in a "
+                    f"row named for a mark. Available: {list(icons.names())}",
+                )
+            if key not in icons.names():
+                near = icons.suggest(key)
+                did_you_mean = f" Did you mean {near}?" if near else ""
+                raise ToolError(
+                    "unknown_icon",
+                    f"{component}.{name} names icon {key!r}, which is not in the set."
+                    f"{did_you_mean} An icon is named, never drawn: the harness holds the "
+                    "path data so the mark can take the theme's accent and stay vector on "
+                    f"the way out. Available: {list(icons.names())}",
+                )
+
+
 def _check_block(session: Session, slide: Slide, block: Block) -> list[str]:
     """Budget every filled slot of a block. Returns human-readable failures."""
     from ..render import expand
@@ -221,6 +265,7 @@ def add_slide(
             raise ToolError("missing_slot", f"{key} requires {missing}")
         _check_media(key, spec["slots"])
         _check_structured(key, spec["slots"])
+        _check_icons(key, spec["slots"])
         built.append(Block(id=session.new_id("bk"), region=region, component=key,
                            variant=variant, slots=spec["slots"]))
 
@@ -342,6 +387,7 @@ def set_slots(session: Session, slide_id: str, block_id: str, patch: dict[str, A
                         f"{block.component} has no slot(s) {sorted(unknown)}")
     _check_media(block.component, patch)
     _check_structured(block.component, patch)
+    _check_icons(block.component, patch)
 
     before = dict(block.slots)
     trial = Block(id=block.id, region=block.region, component=block.component,

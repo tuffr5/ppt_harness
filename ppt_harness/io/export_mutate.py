@@ -24,10 +24,20 @@ from pptx import Presentation
 from pptx.util import Emu, Pt
 
 from ..components import decoration as decoration_mod
+from ..components import icons as icon_set
 from ..components import overrides as overrides_mod
 from ..render import expand
 from ..state import richtext, slots
-from ..state.document import ChartSpec, Deck, Frame, Mode, Shape, Slide, TableSpec
+from ..state.document import (
+    EMU_PER_POINT,
+    ChartSpec,
+    Deck,
+    Frame,
+    Mode,
+    Shape,
+    Slide,
+    TableSpec,
+)
 from . import embed_fonts
 from . import media as media_mod
 from . import writer_assertions as fidelity
@@ -182,6 +192,19 @@ def _write_ejected(prs, model: Slide, deck: Deck, written: set[tuple[int, int]],
         if shape.opaque:
             continue
 
+        if shape.geometry is not None and shape.geometry.icon:
+            # A frozen icon, written by the same function the managed path uses. The colour
+            # and the weight come off the shape rather than being resolved again: eject is
+            # one-way, and a mark that had to look its accent up would change colour the
+            # moment the block it came from stopped existing.
+            f = shape.frame
+            _add_icon(slide, shape.geometry.icon, (f.x, f.y, f.cx, f.cy),
+                      shape.geometry.line or theme.palette.get("ink", "#111111"),
+                      round(shape.geometry.line_width_pt * EMU_PER_POINT),
+                      f"{model.id}:{shape.id}")
+            added += 1
+            continue
+
         if shape.geometry is not None and shape.geometry.visible:
             f = shape.frame
             geometry = shape.geometry
@@ -323,6 +346,23 @@ def _write_managed(prs, model: Slide, deck: Deck, written: set[tuple[int, int]],
             fidelity.harden_text_frame(frame, line_pt=laid_out.spec.line * 0.75)
             written.add((slide_index, int(box.shape_id)))
             added += 1
+
+        # After the cells, not before: the mark's square is disjoint from its own label by
+        # construction — `LaidOutSlot._carve` cut one out of the other — but a decorated icon
+        # variant would paint a panel across the whole cell, and a shape added before that
+        # panel is a shape behind it. Drawn last, an icon is on its card rather than under it.
+        #
+        # Colour through the block's accent, which is a *role* on the theme's ordered ramp
+        # and never a value in the catalog. That is the whole argument for geometry over a
+        # picture: the same path is on-brand on every theme the deck is retargeted to,
+        # where a raster is one colour for ever.
+        accent = overrides_mod.accent_for(theme, laid_out.overrides)
+        for index, (icon_name, icon_box) in enumerate(
+                expand.written_icons(laid_out, value)):
+            stroke = expand.icon_stroke_px(icon_box) * cx / canvas_w
+            if _add_icon(slide, icon_name, icon_box.emu(canvas_w, canvas_h, cx, cy),
+                         accent, round(stroke), f"{name}#{index}.icon"):
+                added += 1
 
     _clear_empty_placeholders(slide)
     return added
@@ -699,6 +739,111 @@ def _is_stat_slot(value) -> bool:
     """
     return (isinstance(value, list) and bool(value)
             and all(slots.is_stat(item) for item in value))
+
+
+#: The coordinate space an icon's path is written in. `a:path` declares its own `w`/`h` and
+#: the shape scales that space into its extent, so this is a *precision*, not a size: 21600
+#: units across a 24-unit view box is 900 steps per authored unit, which is finer than any
+#: renderer's device pixel at slide scale. It is also the number PowerPoint's own preset
+#: geometry uses, so nothing here is exercising an unusual corner of the format.
+ICON_PATH_UNITS = 21600
+
+
+def _custom_geometry(sp_pr, name: str):
+    """One icon's path as an `<a:custGeom>` element, ready to replace a preset one.
+
+    This is the whole reason an icon is a *shape* rather than a picture. python-pptx cannot
+    read SVG at all — `add_asset` refuses it with `svg_unsupported`, see `io/media.is_svg` —
+    so the choice was never "vector or raster", it was "native geometry or a rasteriser in
+    the build". Native wins on the thing that matters here: a `custGeom` stroke resolves from
+    the theme at write time, so one path serves every palette, where a PNG is one colour
+    forever and a PNG per accent is a cache that goes stale the first time a theme changes.
+
+    Only `moveTo`, `lnTo`, `cubicBezTo` and `close` are emitted. The vendored paths are
+    normalised to exactly those at vendor time precisely so this function has no arc
+    conversion in it — SVG parametrises an elliptic arc by its endpoint and two flags and
+    DrawingML by centre and sweep, and doing that conversion here would put trigonometry in
+    the exporter that the HTML preview would then have to reproduce and could get wrong.
+
+    `fill="none"` on the path, because these are open strokes. It is also what keeps the
+    harness out of the one place DrawingML and SVG are not plainly the same shape: how a
+    renderer resolves the winding of overlapping subpaths. An outline icon has no counters,
+    so there is nothing to resolve.
+    """
+    from lxml import etree
+    from pptx.oxml.ns import qn
+
+    scale = ICON_PATH_UNITS / icon_set.view_box()
+    geometry = sp_pr.makeelement(qn("a:custGeom"), {})
+    for tag in ("a:avLst", "a:gdLst", "a:ahLst", "a:cxnLst"):
+        etree.SubElement(geometry, qn(tag))
+    etree.SubElement(geometry, qn("a:rect"), {"l": "0", "t": "0", "r": "r", "b": "b"})
+    path_list = etree.SubElement(geometry, qn("a:pathLst"))
+    path = etree.SubElement(path_list, qn("a:path"), {
+        "w": str(ICON_PATH_UNITS), "h": str(ICON_PATH_UNITS), "fill": "none", "stroke": "1"})
+
+    for command, values in icon_set.segments(name):
+        if command == "Z":
+            etree.SubElement(path, qn("a:close"))
+            continue
+        node = etree.SubElement(path, qn({"M": "a:moveTo", "L": "a:lnTo",
+                                          "C": "a:cubicBezTo"}[command]))
+        for index in range(0, len(values), 2):
+            # No Y flip. SVG and DrawingML both put the origin at the top left with y
+            # increasing downwards, so a path copied across arrives the right way up — worth
+            # stating, because the two disagree often enough elsewhere that it reads like an
+            # oversight rather than a fact that was checked.
+            etree.SubElement(node, qn("a:pt"), {
+                "x": str(round(values[index] * scale)),
+                "y": str(round(values[index + 1] * scale)),
+            })
+    return geometry
+
+
+def _add_icon(slide, name: str, box: tuple[int, int, int, int], colour: str,
+              stroke_emu: int, shape_name: str) -> bool:
+    """Draw one icon as a real shape the recipient can select, recolour and resize.
+
+    Built by taking an ordinary autoshape and swapping its `<a:prstGeom>` for the custom one,
+    rather than by assembling a `<p:sp>` here: that borrows python-pptx's shape-id allocation
+    and its empty text body, and the swap is the only part of this that the library has no
+    API for. Same technique as `_gradient_fill` above and for the same reason — author the
+    element the schema wants, in the place the schema wants it, and let the library keep
+    owning everything around it.
+
+    Every property is stated, exactly as `_paint_panel` states them: an autoshape left alone
+    inherits the master's accent fill, an outline and a preset shadow, and an icon that
+    arrived as a filled rounded rectangle with a drop shadow is not the mark the theme asked
+    for.
+    """
+    from lxml import etree
+    from pptx.dml.color import RGBColor
+    from pptx.enum.shapes import MSO_SHAPE
+    from pptx.oxml.ns import qn
+
+    if not icon_set.path(name):
+        return False
+    x, y, w, h = box
+    shape = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Emu(x), Emu(y), Emu(w), Emu(h))
+    shape.name = shape_name
+    sp_pr = shape._element.spPr
+    preset = sp_pr.find(qn("a:prstGeom"))
+    if preset is None:  # pragma: no cover - add_shape always writes one
+        return False
+    sp_pr.replace(preset, _custom_geometry(sp_pr, name))
+
+    shape.fill.background()
+    shape.line.color.rgb = RGBColor.from_string(colour.lstrip("#").upper())
+    shape.line.width = Emu(max(1, stroke_emu))
+    # Round caps and joins, because that is how the set is drawn: Tabler's outline style sets
+    # `stroke-linecap="round"` on every icon, and square ends turn a rounded chevron into
+    # something that reads as a different, cruder drawing at small sizes.
+    line = sp_pr.find(qn("a:ln"))
+    if line is not None:
+        line.set("cap", "rnd")
+        etree.SubElement(line, qn("a:round"))
+    shape.shadow.inherit = False
+    return True
 
 
 #: Preset geometry a decoration layer may ask for. Two entries, and that is the point: these

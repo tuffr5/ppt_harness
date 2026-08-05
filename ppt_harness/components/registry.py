@@ -22,6 +22,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from . import icons
+
 SlotShape = Literal["title", "prose", "list", "media", "tabular", "chart"]
 
 
@@ -50,6 +52,17 @@ class SlotSpec:
     #: list of ten things, and `per_row` cannot help because it arranges the items within a
     #: slot, never the slots themselves.
     width_share: float = 1.0
+    #: Whether this slot's items name an icon: `{"icon": "growth", "label": ...}` rather than
+    #: a bare string. A *name* out of `components.icons`, the way a decoration names a role —
+    #: never path data, never a colour, never a position. The mark is drawn as real geometry
+    #: and inherits the block's accent, so an icon is on-brand on every theme the deck is
+    #: retargeted to.
+    #:
+    #: Declared on the slot rather than on the variant because it is a fact about the
+    #: *content* — the gate refuses an item without an icon whatever variant is in force,
+    #: which is what stops `icon_row` going back to being a component named for a mark it
+    #: does not draw. Where the mark goes is the variant's business (`Variant.icon`).
+    icons: bool = False
 
 
 @dataclass(frozen=True)
@@ -65,6 +78,16 @@ class Variant:
     #: never a colour or a length: the theme decides what a card is filled with, and a hex
     #: value here would be the catalog answering a question that is not its to answer.
     decoration: str = ""
+    #: Where an icon-bearing slot puts its mark: `top` (above the label) or `left` (beside
+    #: it). Empty for every variant that draws none.
+    #:
+    #: This is the whole difference between `icon_row/icon_top` and `icon_row/icon_left`, and
+    #: for as long as it did not exist the two names described the same slide: `per_row` and
+    #: `align` were all they differed in, and neither of those is an icon being anywhere.
+    #: Resolved to a rectangle by `render/expand`, which is the only module allowed to produce
+    #: one — a `top` written here as an offset in px would be the catalog holding a
+    #: coordinate.
+    icon: Literal["", "top", "left"] = ""
     slot_order: tuple[str, ...] = ()
     """Slots laid out in this order rather than in the component's declared one.
 
@@ -259,18 +282,34 @@ COMPONENTS: dict[str, Component] = {
     ),
     "icon_row": Component(
         key="icon_row",
-        purpose="A row of labelled marks — the same content as a card grid, lighter.",
+        purpose=("A row of labelled marks — the same content as a card grid, lighter. Each "
+                 'item is {"icon": <name>, "label": ...}; see list_components("icon_row") '
+                 "for the names."),
         regions=("footer_row", "body", "canvas"),
         degrades_to="card_grid",
         slots={
             "title": SlotSpec("title", role="block_title", required=False, max_lines=1,
                               height_share=0.2),
+            # `icons=True` is what makes the component's name true. It held a list of bare
+            # labels, both its variants were called `icon_*`, and nothing in the harness drew
+            # a mark — so it was `bullets` with a smaller type role and two names for one
+            # rendering. Still a `list` shape, deliberately: the degradation to `card_grid`
+            # is only content-preserving while the shapes match, and an icon is an attribute
+            # of an item rather than a different kind of slot.
+            #
+            # `max_lines` stays 2 and the mark is sized around it, not the other way about:
+            # `_icon_side` holds back the lines the label would have had anyway, so adding an
+            # icon to this component took no capacity off it. A mark that shrank the budget
+            # would have made half the catalog's own worst-case fixtures unwritable.
             "items": SlotSpec("list", role="label", max_items=5, max_lines=2,
-                              height_share=0.8),
+                              height_share=0.8, icons=True),
         },
+        # Now genuinely two renderings: the mark above the word, or beside it. Both are laid
+        # out as a grid of cells, which is what lets each item own a mark — `per_row=1` would
+        # write the whole slot as one text frame, and one frame cannot have five icons in it.
         variants={
-            "icon_top": Variant("icon_top", per_row=5, align="center"),
-            "icon_left": Variant("icon_left", per_row=2),
+            "icon_top": Variant("icon_top", per_row=5, align="center", icon="top"),
+            "icon_left": Variant("icon_left", per_row=2, icon="left"),
         },
     ),
     "timeline": Component(
@@ -524,17 +563,18 @@ def catalog() -> list[dict[str, Any]]:
 
 def describe(key: str) -> dict[str, Any]:
     comp = get(key)
-    return {
+    out: dict[str, Any] = {
         "key": comp.key,
         "purpose": comp.purpose,
         "regions": list(comp.regions),
         "variants": {
-            # `decoration` is reported because it is the only difference between several of
-            # these pairs, and a model choosing between `flat` and `carded` on the strength
-            # of `columns`, `per_row` and `align` alone is choosing between two identical
+            # `decoration` and `icon` are reported because they are the only difference
+            # between several of these pairs, and a model choosing between `flat` and
+            # `carded` — or between `icon_top` and `icon_left` — on the strength of
+            # `columns`, `per_row` and `align` alone is choosing between two identical
             # descriptions.
             name: {"columns": v.columns, "per_row": v.per_row, "align": v.align,
-                   "decoration": v.decoration}
+                   "decoration": v.decoration, "icon": v.icon}
             for name, v in comp.variants.items()
         },
         "slots": {
@@ -544,8 +584,16 @@ def describe(key: str) -> dict[str, Any]:
                 "required": spec.required,
                 "max_items": spec.max_items,
                 "max_lines": spec.max_lines,
+                "icons": spec.icons,
             }
             for name, spec in comp.slots.items()
         },
         "degrades_to": comp.degrades_to,
     }
+    # The names, in full, on the one component that has an icon slot. Behind a key rather
+    # than in `catalog()` for the reason the slot schemas are: a hundred and forty-five words
+    # on every turn buys nothing until a model is actually filling this component, and the
+    # alternative to listing them here is a model guessing names and being refused.
+    if any(spec.icons for spec in comp.slots.values()):
+        out["icons"] = list(icons.names())
+    return out

@@ -33,6 +33,18 @@ def is_stat(item: Any) -> bool:
     return isinstance(item, dict) and bool(item.get("value")) and bool(item.get("label"))
 
 
+def is_icon(item: Any) -> bool:
+    """An `{icon, label}` pair — a mark with the word it stands for, in one cell.
+
+    The mark is drawn as geometry beside or above the label, so it occupies *no text*: the
+    line this item takes up is the label and nothing else. That is why `_line` returns the
+    label alone rather than composing something for the icon — a budget that charged an icon
+    to the text would refuse labels that render with room to spare, and the mark's own
+    rectangle is already taken out of the cell by `render/expand` before the budget sees it.
+    """
+    return isinstance(item, dict) and bool(item.get("icon")) and bool(item.get("label"))
+
+
 def slot_text(value: Any) -> str:
     """A slot value as the lines it will take up."""
     if value is None:
@@ -68,6 +80,9 @@ def _line(item: Any) -> str:
     the figure away, so `stat_row`, the one component whose stated purpose is "three or four
     headline numbers", exported the words and dropped every number. It was invisible because
     the preview reads the same helper: both agreed, and both were wrong.
+
+    An `{icon, label}` pair is the opposite case and falls out of `label or value` correctly:
+    the icon is geometry in its own rectangle, so the *text* of the item is the label alone.
     """
     if isinstance(item, dict):
         value, label = item.get("value"), item.get("label")
