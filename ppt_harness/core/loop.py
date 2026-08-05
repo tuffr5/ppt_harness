@@ -98,6 +98,13 @@ analysis". A slide whose title is a noun phrase is usually one nobody will remem
 of them. If there are eight, there is a structure hiding in there — find it.
 - Prose belongs in the notes, not on the slide. Cut every word that survives its own \
 removal.
+- A component's declared maximum is what it survives, not what it should carry. Half is \
+usually the right number: four bullets rather than eight, three cards rather than six.
+- Two blocks on a slide is normal, three is a lot, four is a slide that wanted to be two. \
+A title over a body over a second body over a row of figures is the most common way to \
+overflow, and the fix is a second slide rather than tighter words.
+- Count what a slide will hold before you write it. If you cannot say that count before \
+calling add_slide, the slide is not designed yet.
 - Reach for the component that matches the *shape of the argument*: a comparison wants two \
 columns, a trend wants a chart, a single number wants to be large and alone.
 - Respect what is already there. A deck has a voice; match it rather than replacing it \
