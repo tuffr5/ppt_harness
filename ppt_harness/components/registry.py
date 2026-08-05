@@ -168,6 +168,10 @@ COMPONENTS: dict[str, Component] = {
         variants={
             "left": Variant("left", align="left"),
             "centered": Variant("centered", align="center"),
+            # One shape behind everything, in the theme's own brand colour at a tenth of its
+            # strength. It is the cheapest move in the catalog from "blank white page" to
+            # "designed", and an opener is the slide where a blank white page costs most.
+            "washed": Variant("washed", align="center", decoration="washed"),
         },
     ),
     "slide_title": Component(
@@ -222,6 +226,11 @@ COMPONENTS: dict[str, Component] = {
             # variant was a synonym for `flat` — same columns, same alignment, same boxes —
             # and the catalog was offering a rendering the writer never drew.
             "carded": Variant("carded", per_row=4, align="center", decoration="card"),
+            # The same card with depth: a gradient across it and the shade it drops. A flat
+            # panel and a lit one are as different as `flat` and `carded` are, and this is
+            # the difference the rubrics actually score — a slide of clean type and no
+            # geometry reads as unfinished however good the type is.
+            "raised": Variant("raised", per_row=4, align="center", decoration="raised"),
             "two_row": Variant("two_row", per_row=2, align="center"),
         },
     ),
@@ -245,6 +254,7 @@ COMPONENTS: dict[str, Component] = {
             "1x3": Variant("1x3", per_row=3),
             "2x2": Variant("2x2", per_row=2),
             "2x3": Variant("2x3", per_row=3),
+            "raised": Variant("raised", per_row=3, decoration="raised"),
         },
     ),
     "icon_row": Component(
@@ -407,7 +417,14 @@ COMPONENTS: dict[str, Component] = {
             "items": SlotSpec("list", role="label", required=False, max_items=3,
                               max_lines=1, height_share=0.34),
         },
-        variants={"bar": Variant("bar"), "centered": Variant("centered", align="center")},
+        variants={
+            "bar": Variant("bar"),
+            "centered": Variant("centered", align="center"),
+            # The one sentence, staged: a lit panel standing on a ground plane with its
+            # contact shadow. An object floating in empty canvas looks pasted on, and a
+            # takeaway is the slide most likely to be one object in a lot of empty canvas.
+            "staged": Variant("staged", align="center", decoration="staged"),
+        },
     ),
     "section_break": Component(
         key="section_break",
@@ -418,7 +435,11 @@ COMPONENTS: dict[str, Component] = {
             "prose": SlotSpec("prose", role="body", required=False, max_lines=2,
                               height_share=0.4),
         },
-        variants={"bar": Variant("bar"), "centered": Variant("centered", align="center")},
+        variants={
+            "bar": Variant("bar"),
+            "centered": Variant("centered", align="center"),
+            "washed": Variant("washed", align="center", decoration="washed"),
+        },
     ),
 }
 

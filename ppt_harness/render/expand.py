@@ -28,6 +28,44 @@ BLOCK_GAP = 24
 #: more separation across a row than down a column to read the cells as separate things.
 CELL_GAP = 20
 
+# ------------------------------------------------------- where a decoration's layers go
+#
+# A decoration names a `place` and this module answers with a rectangle, for the same reason
+# a component names a region and not a box: DESIGN §1.4 gives exactly one module permission
+# to produce a coordinate, and a shadow offset is a coordinate. The numbers are proportions
+# of the panel they hang off, so a card in a footer band and a hero panel get shade at the
+# same *scale* rather than the same number of pixels.
+
+#: The contact ellipse, as fractions of the panel it sits beneath. Narrower than the panel
+#: because the light wraps its corners, and shallow because a shadow on the floor is seen
+#: almost edge-on.
+#:
+#: `SINK` is exactly half, and that is the whole trick: it puts the ellipse's centre — the
+#: darkest point of the ramp — precisely on the panel's bottom edge, so the upper half is
+#: hidden behind the panel and what is left is dark where the object meets the ground and
+#: gone a little way out from it. Sunk further, the shadow separates from the panel and
+#: reads as a grey blob lying near it.
+CONTACT_WIDTH = 0.88
+CONTACT_HEIGHT = 0.14
+CONTACT_SINK = 0.50
+
+#: The ground plane: wider than the object standing on it and far shallower than the object
+#: is tall, which is what makes a horizontal surface read as receding rather than as a second
+#: panel. Sunk less than half, so most of it is out in front of the object where the eye can
+#: see there is a floor.
+GROUND_WIDTH = 1.15
+GROUND_HEIGHT = 0.55
+GROUND_SINK = 0.30
+
+#: The slide wash, as fractions of the canvas: centred slightly below the middle so the light
+#: pools under the content rather than haloing it, and *larger than the slide on every side*.
+#: That is not a rounding allowance. A radial gradient reaches zero at its own rim, so an
+#: ellipse whose rim lands inside the canvas draws a visible arc with clean white outside it —
+#: which is an object, and this is meant to be a change in the air. Only the inner part of the
+#: ramp is ever on screen.
+WASH_CENTRE = (0.5, 0.55)
+WASH_RADIUS = (0.95, 0.85)
+
 
 @dataclass(frozen=True)
 class Box:
@@ -201,6 +239,46 @@ def written_cells(laid_out: LaidOutSlot, value: Any) -> list[tuple[str, Box]]:
         return [(slot_render.slot_text(value), laid_out.box)]
     parts = [slot_render.slot_text(item) for item in value]
     return list(zip(parts, laid_out.cells(len(parts)), strict=False))
+
+
+def _beneath(panel: Box, width: float, height: float, sink: float) -> Box:
+    """A shallow ellipse's box, centred under `panel` and sunk past its foot.
+
+    `sink` is a fraction of the ellipse's own height, so the shape sits *at* the panel's
+    bottom edge at every panel size instead of drifting out from under tall ones.
+    """
+    w, h = panel.w * width, max(4.0, panel.h * height)
+    return Box(x=panel.x + (panel.w - w) / 2,
+               y=panel.y + panel.h - h * (1.0 - sink), w=w, h=h)
+
+
+def wash_box(theme: Theme) -> Box:
+    """The slide-wide radial's rectangle, in canvas px.
+
+    Deliberately larger than the canvas and partly off it: the ellipse's own outline must
+    never be visible, or the wash stops being a wash and becomes a very large pale shape.
+    Negative coordinates are legal in OOXML and in the preview, which clips them.
+    """
+    w, h = theme.grid.canvas
+    cx, cy = WASH_CENTRE
+    rx, ry = WASH_RADIUS
+    return Box(x=(cx - rx) * w, y=(cy - ry) * h, w=2 * rx * w, h=2 * ry * h)
+
+
+def decoration_box(theme: Theme, panel: Box, place: str) -> Box:
+    """The rectangle one decoration layer occupies.
+
+    `place` is the decoration's word — `panel`, `contact`, `ground`, `slide` — and this is
+    where it becomes a number. Both writers and the preview call this and nothing else, so a
+    shadow cannot be in one place in the file and another in the preview of it.
+    """
+    if place == "slide":
+        return wash_box(theme)
+    if place == "contact":
+        return _beneath(panel, CONTACT_WIDTH, CONTACT_HEIGHT, CONTACT_SINK)
+    if place == "ground":
+        return _beneath(panel, GROUND_WIDTH, GROUND_HEIGHT, GROUND_SINK)
+    return panel
 
 
 def content_box(theme: Theme) -> Box:

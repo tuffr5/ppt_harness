@@ -141,6 +141,47 @@ def _paint(fill: tuple[str, float] | None, line: tuple[str, float, float] | None
     return " ".join(bits)
 
 
+#: A gradient fill, as the model holds one: (kind, angle in OOXML degrees, stops), where a
+#: stop is (position 0..1, `#RRGGBB`, alpha).
+Gradient = tuple[str, float, tuple[tuple[float, str, float], ...]]
+
+def _gradient_id(gradient: Gradient) -> str:
+    """A stable `<defs>` id for one ramp.
+
+    Content-addressed, and deterministic across processes: two shapes with the same gradient
+    share one definition, and the same slide rendered twice produces the same bytes. A
+    counter would break that, and `hash()` is salted per run.
+    """
+    from hashlib import blake2b
+
+    return "g" + blake2b(repr(gradient).encode(), digest_size=5).hexdigest()
+
+
+def _gradient_defs(gradient: Gradient, ident: str) -> str:
+    """A `<linearGradient>` or `<radialGradient>` matching what `<a:gradFill>` draws.
+
+    OOXML measures its linear angle clockwise from due east; SVG states the vector's two
+    endpoints instead, so the angle is turned back into a unit vector across the 0..1
+    object box. The radial is centred with its ramp running out to the shape's edge, which
+    is what `path=circle` with a collapsed `fillToRect` means.
+    """
+    import math
+
+    kind, angle, stops = gradient
+    body = "".join(
+        f'<stop offset="{at * 100:.1f}%" stop-color="{colour}" '
+        f'stop-opacity="{alpha:.3f}"/>'
+        for at, colour, alpha in stops
+    )
+    if kind == "radial":
+        return (f'<defs><radialGradient id="{ident}" cx="50%" cy="50%" r="50%">'
+                f'{body}</radialGradient></defs>')
+    dx, dy = math.cos(math.radians(angle)), math.sin(math.radians(angle))
+    x1, y1 = 0.5 - dx / 2, 0.5 - dy / 2
+    return (f'<defs><linearGradient id="{ident}" x1="{x1:.3f}" y1="{y1:.3f}" '
+            f'x2="{x1 + dx:.3f}" y2="{y1 + dy:.3f}">{body}</linearGradient></defs>')
+
+
 def shape_svg(
     preset: str,
     width: float,
@@ -149,15 +190,27 @@ def shape_svg(
     line: tuple[str, float, float] | None,
     flip_h: bool = False,
     flip_v: bool = False,
+    gradient: Gradient | None = None,
 ) -> str:
     """An `<svg>` element that fills its container, drawing `preset`.
 
     Returns an empty string when there is nothing to draw — a shape with neither fill nor
     outline is a text box in all but name, and emitting an invisible SVG over it would only
     swallow clicks.
+
+    `gradient` is a ramp rather than a flat colour, and it is what an ejected decoration
+    panel carries. Without it a slide that left managed mode drew its lit cards as nothing
+    at all in the preview while the exported file still had them — the preview claiming a
+    loss the file did not have is the same bug as the reverse, one direction over.
     """
-    if not fill and not line:
+    if not fill and not line and not gradient:
         return ""
+
+    defs = ""
+    if gradient is not None and gradient[2]:
+        ident = _gradient_id(gradient)
+        defs = _gradient_defs(gradient, ident)
+        fill = (f"url(#{ident})", 1.0)
 
     paint = _paint(fill, line)
     if preset in ELLIPTIC:
@@ -182,7 +235,7 @@ def shape_svg(
 
     return (
         '<svg class="geom" viewBox="0 0 100 100" preserveAspectRatio="none" '
-        f'aria-hidden="true"><g{transform}>{body}</g></svg>'
+        f'aria-hidden="true">{defs}<g{transform}>{body}</g></svg>'
     )
 
 

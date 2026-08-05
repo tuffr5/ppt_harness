@@ -184,9 +184,20 @@ def _write_ejected(prs, model: Slide, deck: Deck, written: set[tuple[int, int]],
 
         if shape.geometry is not None and shape.geometry.visible:
             f = shape.frame
-            paint = decoration_mod.Paint(fill=shape.geometry.fill or "",
-                                         line=shape.geometry.line or "",
-                                         radius=float(theme.shape.get("radius") or 0.0))
+            geometry = shape.geometry
+            # The ramp is read off the frozen shape rather than resolved again from the
+            # decoration it came from: eject is one-way, and a panel that had to look its
+            # gradient up would lose its depth the moment that decoration changed.
+            paint = decoration_mod.Paint(
+                fill=geometry.fill or "",
+                line=geometry.line or "",
+                radius=float(theme.shape.get("radius") or 0.0),
+                stops=tuple(decoration_mod.Stopped(at=s.at, colour=s.colour, alpha=s.alpha)
+                            for s in geometry.stops),
+                kind=geometry.gradient,
+                angle=geometry.gradient_angle,
+                preset=geometry.preset,
+            )
             _paint_panel(slide, (f.x, f.y, f.cx, f.cy), paint,
                          f"{model.id}:{shape.id}", emu_per_px)
             added += 1
@@ -238,7 +249,12 @@ def _write_managed(prs, model: Slide, deck: Deck, written: set[tuple[int, int]],
     cx, cy = int(prs.slide_width), int(prs.slide_height)
 
     added = 0
-    for laid_out in expand.expand_slide(theme, model):
+    laid_out_slots = expand.expand_slide(theme, model)
+    # Before anything else, because it is behind everything else: one shape, spanning the
+    # slide, and the cheapest thing in the catalog that stops a slide looking like a blank
+    # page with words on it.
+    added += _paint_slide_layers(slide, model, theme, laid_out_slots, (cx, cy))
+    for laid_out in laid_out_slots:
         block = model.block(laid_out.block_id)
         if block is None:
             continue
@@ -281,7 +297,7 @@ def _write_managed(prs, model: Slide, deck: Deck, written: set[tuple[int, int]],
         # One panel per written box, and drawn before it: `spTree` is painted in document
         # order, so a card added after its text would cover the words it is behind.
         panels = laid_out.panels(len(written_cells))
-        paint = decoration_mod.paint_for(theme, laid_out.decoration, laid_out.shape)
+        layers = decoration_mod.layers_for(theme, laid_out.decoration, laid_out.shape)
         for index, ((part, cell), panel) in enumerate(zip(written_cells, panels,
                                                           strict=True)):
             runs = richtext.parse(part)
@@ -289,9 +305,14 @@ def _write_managed(prs, model: Slide, deck: Deck, written: set[tuple[int, int]],
             if not text:
                 continue
             cell_name = name if laid_out.columns == 1 else f"{name}#{index}"
-            if paint.visible:
-                _paint_panel(slide, panel.emu(canvas_w, canvas_h, cx, cy), paint,
-                             f"{cell_name}.panel", cx / canvas_w)
+            # Back to front, in the order the decoration lists them: the ground it stands
+            # on, the shade it drops, then the panel — and all of them before the words.
+            for layer in layers:
+                if layer.place == "slide":
+                    continue  # drawn once for the slide, above
+                box = expand.decoration_box(theme, panel, layer.place)
+                _paint_panel(slide, box.emu(canvas_w, canvas_h, cx, cy), layer,
+                             f"{cell_name}.{layer.place}", cx / canvas_w)
             cx_, cy_, cw, ch = cell.emu(canvas_w, canvas_h, cx, cy)
             box = slide.shapes.add_textbox(Emu(cx_), Emu(cy_), Emu(cw), Emu(ch))
             box.name = cell_name
@@ -304,6 +325,25 @@ def _write_managed(prs, model: Slide, deck: Deck, written: set[tuple[int, int]],
             added += 1
 
     _clear_empty_placeholders(slide)
+    return added
+
+
+def _paint_slide_layers(slide, model: Slide, theme, laid_out_slots, size) -> int:
+    """The wash behind a whole slide, drawn once however many slots asked for it.
+
+    Once, and first. A slide-scoped layer is not a property of the slot that named it — two
+    slots wearing the same decoration would otherwise paint two washes, and two 13% ellipses
+    are one 24% one, which is a different slide from the one the preview drew.
+    """
+    cx, cy = size
+    canvas_w, canvas_h = theme.grid.canvas
+    worn = [(item.decoration, item.shape) for item in laid_out_slots if item.decoration]
+    added = 0
+    for layer in decoration_mod.slide_layers(theme, worn):
+        box = expand.decoration_box(theme, expand.content_box(theme), layer.place)
+        _paint_panel(slide, box.emu(canvas_w, canvas_h, cx, cy), layer,
+                     f"{model.id}.{layer.place}", cx / canvas_w)
+        added += 1
     return added
 
 
@@ -661,9 +701,72 @@ def _is_stat_slot(value) -> bool:
             and all(slots.is_stat(item) for item in value))
 
 
+#: Preset geometry a decoration layer may ask for. Two entries, and that is the point: these
+#: are shapes every renderer draws from the same parametric definition, so what the recipient
+#: opens is what the preview showed. A soft edge or a blur would be neither.
+LAYER_PRESETS = {"roundRect": "ROUNDED_RECTANGLE", "ellipse": "OVAL"}
+
+
+def _gradient_fill(shape, paint: decoration_mod.Paint) -> None:
+    """Write a decoration layer's ramp as a real `<a:gradFill>`.
+
+    Authored as XML rather than through `shape.fill.gradient()` because that API gives two
+    stops and no opacity, and both of those are the technique rather than a detail: three
+    stops is what stops a ramp reading as a flat fill, and the alpha ramp is the whole of a
+    contact shadow. Every element here is stock DrawingML — `gsLst`, `lin`, `path` — so it
+    round-trips through PowerPoint, Keynote and LibreOffice without being rasterised.
+
+    `background()` first, because python-pptx puts `<a:noFill>` at the position in `spPr`
+    that the schema requires of a fill; replacing that element in place is what keeps the
+    part valid without this function knowing the element order.
+    """
+    from lxml import etree
+    from pptx.oxml.ns import qn
+
+    shape.fill.background()
+    sp_pr = shape._element.spPr
+    placeholder = sp_pr.find(qn("a:noFill"))
+    if placeholder is None:  # pragma: no cover - background() always writes one
+        return
+
+    # Positions mean the same thing in all three renderings of this ramp: `pos=0` is the
+    # focus of a path gradient, `0%` is the centre of a CSS `radial-gradient`, and `offset=0`
+    # is the centre of an SVG `radialGradient`. Verified against a real renderer rather than
+    # assumed — the convention is easy to get backwards, and backwards is a shadow that is a
+    # dark ring with a clear middle.
+    grad = sp_pr.makeelement(qn("a:gradFill"), {"rotWithShape": "0"})
+    stop_list = etree.SubElement(grad, qn("a:gsLst"))
+    for stop in paint.stops:
+        node = etree.SubElement(stop_list, qn("a:gs"))
+        node.set("pos", str(max(0, min(100000, round(stop.at * 100000)))))
+        colour = etree.SubElement(node, qn("a:srgbClr"))
+        colour.set("val", stop.colour.lstrip("#").upper())
+        if stop.alpha < 1.0:
+            etree.SubElement(colour, qn("a:alpha")).set(
+                "val", str(max(0, round(stop.alpha * 100000))))
+
+    if paint.kind == "radial":
+        # `path=circle` with the focus rectangle collapsed to the centre, so the ramp runs
+        # from the middle of the shape out to its rim — which is what makes the contact
+        # shadow dark under the panel and gone by the time it reaches the edge.
+        path = etree.SubElement(grad, qn("a:path"))
+        path.set("path", "circle")
+        focus = etree.SubElement(path, qn("a:fillToRect"))
+        for edge in ("l", "t", "r", "b"):
+            focus.set(edge, "50000")
+    else:
+        # 60000ths of a degree, clockwise from due east. `scaled=0` keeps the light coming
+        # from one direction rather than one that tilts with each panel's aspect ratio.
+        line = etree.SubElement(grad, qn("a:lin"))
+        line.set("ang", str(round(paint.angle * 60000) % 21600000))
+        line.set("scaled", "0")
+
+    sp_pr.replace(placeholder, grad)
+
+
 def _paint_panel(slide, box: tuple[int, int, int, int], paint: decoration_mod.Paint,
                  name: str, emu_per_px: float) -> None:
-    """The rectangle a decorated variant draws behind a written box.
+    """One shape a decorated variant draws behind a written box.
 
     A real autoshape, so the recipient can restyle it, and every property is stated. An
     autoshape left alone inherits the master's accent fill, its outline and a preset
@@ -678,14 +781,18 @@ def _paint_panel(slide, box: tuple[int, int, int, int], paint: decoration_mod.Pa
     from pptx.enum.shapes import MSO_SHAPE
 
     x, y, w, h = box
-    shape = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE,
-                                   Emu(x), Emu(y), Emu(w), Emu(h))
+    preset = getattr(MSO_SHAPE, LAYER_PRESETS.get(paint.preset, "ROUNDED_RECTANGLE"))
+    shape = slide.shapes.add_shape(preset, Emu(x), Emu(y), Emu(w), Emu(h))
     shape.name = name
     # roundRect's adjustment is a fraction of the shorter side rather than a length, so the
-    # theme's radius is divided by the box it is drawn on instead of converted to EMU.
-    shorter_px = min(w, h) / max(emu_per_px, 1e-9)
-    shape.adjustments[0] = min(0.5, paint.radius / max(1.0, shorter_px))
-    if paint.fill:
+    # theme's radius is divided by the box it is drawn on instead of converted to EMU. An
+    # ellipse has no adjustment to set — its outline is already its own corner.
+    if shape.adjustments:
+        shorter_px = min(w, h) / max(emu_per_px, 1e-9)
+        shape.adjustments[0] = min(0.5, paint.radius / max(1.0, shorter_px))
+    if paint.stops:
+        _gradient_fill(shape, paint)
+    elif paint.fill:
         shape.fill.solid()
         shape.fill.fore_color.rgb = RGBColor.from_string(paint.fill.lstrip("#"))
     else:
@@ -696,7 +803,9 @@ def _paint_panel(slide, box: tuple[int, int, int, int], paint: decoration_mod.Pa
     else:
         shape.line.fill.background()
     # The theme's shape language says `shadow: none`; inheriting the master's preset one
-    # would be the template deciding what a themed card looks like.
+    # would be the template deciding what a themed card looks like. The depth a decoration
+    # wants is drawn as its own shape — see `decoration.CONTACT` — precisely because a
+    # preset shadow is a renderer effect and this is geometry.
     shape.shadow.inherit = False
 
 

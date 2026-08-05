@@ -34,7 +34,7 @@ from ..state import richtext
 from ..state.document import Mode, Slide, Theme
 from ..state.slots import STAT_LABEL_EM, is_stat
 from . import svg
-from .expand import Box, LaidOutSlot, expand_slide
+from .expand import Box, LaidOutSlot, content_box, decoration_box, expand_slide
 
 #: Slot elements carry this so the measurement pass can find them without guessing.
 PROBE_ATTR = "data-target"
@@ -239,18 +239,54 @@ def _slot_style(theme: Theme, laid_out: LaidOutSlot) -> str:
 # ---------------------------------------------------------------------- managed
 
 
+def _rgba(colour: str, alpha: float) -> str:
+    if alpha >= 1.0:
+        return colour
+    r, g, b = (int(colour.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
+    return f"rgba({r},{g},{b},{alpha:.3f})"
+
+
+def _gradient_css(paint: decoration.Paint) -> str:
+    """A decoration layer's ramp as CSS, drawing what `<a:gradFill>` draws.
+
+    The two coordinate systems differ by a quarter turn and nothing else: OOXML measures
+    clockwise from due east, CSS clockwise from straight up, so the angle is converted once,
+    here. Both are unscaled, so a 45° light stays 45° on a wide panel in both.
+
+    `closest-side` on the radial, because OOXML's `path=circle` with the focus collapsed to
+    the centre runs its ramp from the middle of the shape to its edge — and the shape is an
+    ellipse inscribed in the box, so its edge is exactly the closest side on each axis.
+    """
+    stops = ", ".join(f"{_rgba(stop.colour, stop.alpha)} {stop.at * 100:.0f}%"
+                      for stop in paint.stops)
+    if paint.kind == "radial":
+        return f"background:radial-gradient(ellipse closest-side at 50% 50%, {stops});"
+    return f"background:linear-gradient({paint.angle + 90:.0f}deg, {stops});"
+
+
 def _panel_html(box: Box, paint: decoration.Paint) -> str:
-    """One decoration panel, in the box the writer paints the same rectangle in.
+    """One decoration layer, in the box the writer paints the same rectangle in.
 
     `box-sizing: border-box` is what makes the border legitimate here: it is drawn inside the
     rectangle, so a card in the preview covers exactly the pixels the exported autoshape
     does rather than a hairline more.
+
+    Nothing here is a CSS effect the file cannot hold. A `filter: blur()` under the panel
+    would look better in a browser and would be rasterised or dropped on the way to OOXML —
+    the shadow is a gradient on an ellipse in both, because that is the only version of it
+    that survives.
     """
-    fill = f"background:{paint.fill};" if paint.fill else ""
+    if paint.stops:
+        fill = _gradient_css(paint)
+    else:
+        fill = f"background:{paint.fill};" if paint.fill else ""
     edge = f"border:{decoration.LINE_PX}px solid {paint.line};" if paint.line else ""
+    # An ellipse is a rectangle with its corners rounded all the way, which is the same
+    # `prstGeom` the writer emits — one shape, described twice, and never two shapes.
+    radius = "50%" if paint.preset == "ellipse" else f"{paint.radius:.0f}px"
     return (f'<div class="panel" style="left:{box.x:.2f}px; top:{box.y:.2f}px; '
             f'width:{box.w:.2f}px; height:{box.h:.2f}px; {fill}{edge}'
-            f'border-radius:{paint.radius:.0f}px"></div>')
+            f'border-radius:{radius}"></div>')
 
 
 def _media_html(laid_out: LaidOutSlot, value: Any, src: str | None) -> str:
@@ -274,7 +310,16 @@ def _media_html(laid_out: LaidOutSlot, value: Any, src: str | None) -> str:
 def _managed_body(theme: Theme, slide: Slide,
                   asset_src: AssetSrc | None = None) -> tuple[str, list[str]]:
     parts, targets = [], []
-    for laid_out in expand_slide(theme, slide):
+    laid_out_slots = expand_slide(theme, slide)
+
+    # Slide-wide layers first and once, exactly as the writer emits them — the preview is
+    # the file rendered, and that includes which shape is behind which.
+    worn = [(item.decoration, item.shape) for item in laid_out_slots if item.decoration]
+    for layer in decoration.slide_layers(theme, worn):
+        parts.append(_panel_html(decoration_box(theme, content_box(theme), layer.place),
+                                 layer))
+
+    for laid_out in laid_out_slots:
         block = slide.block(laid_out.block_id)
         if block is None:
             continue
@@ -304,11 +349,14 @@ def _managed_body(theme: Theme, slide: Slide,
         # geometry the budget already computes analytically.
         grid = laid_out.columns > 1 and isinstance(value, list) and len(value) > 1
         # Same count the writer emits, and drawn before the slot so document order puts it
-        # behind — the preview is the file rendered, down to the z-order.
-        paint = decoration.paint_for(theme, laid_out.decoration, laid_out.shape)
-        if paint.visible:
-            for panel in laid_out.panels(len(value) if grid else 1):
-                parts.append(_panel_html(panel, paint))
+        # behind — the preview is the file rendered, down to the z-order. Layers within a
+        # panel keep the decoration's own order too: ground, shade, then the panel itself.
+        layers = decoration.layers_for(theme, laid_out.decoration, laid_out.shape)
+        for panel in laid_out.panels(len(value) if grid else 1):
+            for layer in layers:
+                if layer.place == "slide":
+                    continue  # drawn once for the slide, above
+                parts.append(_panel_html(decoration_box(theme, panel, layer.place), layer))
 
         if grid:
             # The pad is the writer's inset, spent as padding rather than as a smaller box:
@@ -371,11 +419,14 @@ def _freeform_body(theme: Theme, slide: Slide, cx: int, cy: int,
 
         if shape.geometry is not None:
             g = shape.geometry
+            ramp = ((g.gradient, g.gradient_angle,
+                     tuple((s.at, s.colour, s.alpha) for s in g.stops))
+                    if g.stops else None)
             layers.append(svg.shape_svg(
                 g.preset, box_w, box_h,
                 (g.fill, g.fill_alpha) if g.fill else None,
                 (g.line, g.line_alpha, g.line_width_pt) if g.line else None,
-                g.flip_h, g.flip_v,
+                g.flip_h, g.flip_v, ramp,
             ))
 
         if shape.chart is not None:
