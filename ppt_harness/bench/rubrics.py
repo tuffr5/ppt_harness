@@ -20,18 +20,28 @@ split is what buys the paper's human correlation — Content 0.70, Design 0.90 �
 
 **Coherence is deliberately not here.** See `WHY_NO_COHERENCE`.
 
-Levels are the paper's, edited only where its wording assumes a conference talk. Changing one
-changes what every previously cached description scores to, so `VERSION` is part of the
-description cache key — see `quality.PROMPT_VERSION`.
+Levels are the paper's, edited only where its wording assumes a conference talk. Editing one
+is safe with the cache warm: only *descriptions* are cached, and every run scores them
+afresh, so new levels are applied to old descriptions — which is the intended behaviour and
+the reason the split earns its keep.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-#: Bumped whenever any prompt or level text below changes. Cached descriptions are keyed on
-#: it, because a description written to answer an older `describe` block is not an answer to
-#: the current one and scoring it as though it were would be undetectable.
+#: A manual escape hatch, and deliberately *not* the thing that keeps the cache honest.
+#:
+#: `quality._cache_path` hashes the png, the `describe` text and the describer's model, so
+#: editing a describe block, changing model, or re-rendering at a different width each mint
+#: a new key on their own — verified, not assumed. Nobody has to remember anything for the
+#: common cases, which is the only kind of invalidation worth relying on.
+#:
+#: What it is still for: a change that alters what a description *means* without altering
+#: any of those three — a swap in the render pipeline that produces a byte-identical image
+#: from different geometry, say. Rare, and worth having a lever for. Scoring levels are not
+#: such a change: only descriptions are cached, so new levels reach old descriptions by
+#: design.
 VERSION = "1"
 
 DESCRIBE_SYSTEM = (

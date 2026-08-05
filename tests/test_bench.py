@@ -866,3 +866,29 @@ def test_a_benchmark_nobody_ran_is_omitted_not_drawn_empty(tmp_path: Path) -> No
 
     assert "SlidesBench" not in report.read_text()
     assert not (tmp_path / "charts" / "slidesbench-dimensions.svg").exists()
+
+
+def test_the_description_cache_invalidates_itself(tmp_path: Path) -> None:
+    """Nobody has to remember to bump a version for the cases that actually happen.
+
+    The three inputs that change what a description *is* — the image, the describe prompt,
+    and the model that wrote it — are all in the key. Scoring levels deliberately are not:
+    only descriptions are cached, so an edited rubric is applied to existing descriptions,
+    which is the whole point of describing and scoring separately.
+    """
+    from dataclasses import replace
+
+    from ppt_harness.bench import quality, rubrics
+
+    design = rubrics.RUBRICS["design"]
+    png = b"pretend-this-is-a-render"
+    base = quality._cache_path(tmp_path, png, design, "model-a")
+
+    assert quality._cache_path(tmp_path, png + b"!", design, "model-a") != base
+    assert quality._cache_path(tmp_path, png, design, "model-b") != base
+    assert quality._cache_path(
+        tmp_path, png, replace(design, describe=design.describe + " and the mood"), "model-a"
+    ) != base
+    assert quality._cache_path(
+        tmp_path, png, replace(design, levels={**design.levels, 9: "invented"}), "model-a"
+    ) == base, "an edited rubric must re-score cached descriptions, not discard them"
