@@ -500,3 +500,54 @@ def test_an_added_picture_survives_its_source_file_being_deleted(
     with zipfile.ZipFile(tmp_path / "gone.pptx") as bundle:
         assert [n for n in bundle.namelist() if n.startswith("ppt/media/")], \
             "the picture did not reach the file"
+
+
+def test_removing_an_asset_a_slide_uses_is_refused(blank: Session, picture: Path) -> None:
+    """An asset dropped from under a slide does not fail here — it fails at export, as a
+    slot the writer could not build, on a slide that looked finished. Refusing at the gate is
+    the same trade the budget makes: the cheapest failure is the one that never rendered.
+
+    The refusal names the places, because "it is in use" without saying where leaves the
+    caller to go and search for them.
+    """
+    key = router.dispatch(blank, "add_asset", {"path": str(picture)})["after"]["asset_id"]
+    router.dispatch(blank, "add_slide", {"layout": "stack", "blocks": [
+        {"region": "body", "component": "image_full", "variant": "full",
+         "slots": {"media": {"asset_id": key, "alt": "A picture"}}}]})
+
+    refused = router.dispatch(blank, "remove_asset", {"key": key})
+    assert refused["ok"] is False
+    assert refused["error"] == "asset_in_use"
+    assert blank.deck.slides[0].id in refused["message"], "the refusal has to say where"
+    assert key in blank.store.assets, "a refused removal removed something"
+
+
+def test_an_unused_asset_can_be_taken_back(blank: Session, tmp_path: Path) -> None:
+    """What the tool is actually for: an ingest the caller wants to undo — a wrong file, or a
+    duplicate under a name they would rather reuse. Not housekeeping; `export` writes only
+    referenced media, so an orphan costs the exported deck nothing."""
+    key = router.dispatch(
+        blank, "add_asset", {"path": str(_png(tmp_path / "spare.png"))})["after"]["asset_id"]
+    removed = router.dispatch(blank, "remove_asset", {"key": key})
+    assert removed["ok"] and key not in blank.store.assets
+    assert router.dispatch(blank, "list_assets")["count"] == 0
+
+
+def test_removing_an_asset_is_undoable(blank: Session, tmp_path: Path) -> None:
+    """The bytes are kept, not just the key — otherwise undo restores a name behind nothing
+    and the next export reports a slot it could not build."""
+    path = _png(tmp_path / "spare.png")
+    key = router.dispatch(blank, "add_asset", {"path": str(path)})["after"]["asset_id"]
+    original = blank.store.assets[key][1]
+
+    router.dispatch(blank, "remove_asset", {"key": key})
+    router.dispatch(blank, "undo")
+
+    assert blank.store.assets[key][1] == original, "undo restored the key but not the bytes"
+
+
+def test_removing_an_asset_that_is_not_there_says_so(blank: Session) -> None:
+    """Silence would read as success, and the caller would carry on believing a key is gone
+    that was never present under that name."""
+    result = router.dispatch(blank, "remove_asset", {"key": "not-a-key"})
+    assert result["ok"] is False and result["error"] == "no_such_asset"

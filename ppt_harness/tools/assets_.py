@@ -265,3 +265,62 @@ def list_assets(session: Session) -> dict[str, Any]:
                       "aspect": round(found.aspect, 4)}
         out.append(entry)
     return {"assets": out, "count": len(out)}
+
+
+def _referenced_by(session: Session, key: str) -> list[str]:
+    """Every place in the deck that names this asset, as `slide/where` strings.
+
+    Both channels, because a picture arrives by two doors: a managed `media` slot naming an
+    `asset_id`, and a freeform shape carrying the key `add_image` ingested it under.
+    """
+    found: list[str] = []
+    for slide in session.deck.slides:
+        for block in slide.blocks:
+            for name, value in block.slots.items():
+                if isinstance(value, dict) and value.get("asset_id") == key:
+                    found.append(f"{slide.id}/{block.id}.{name}")
+        for shape in slide.shapes:
+            if shape.asset == key:
+                found.append(f"{slide.id}/{shape.id}")
+    return found
+
+
+@tool("remove_asset",
+      "Drop a picture the deck is carrying. Refused while any slide still uses it.",
+      obj({"key": string("The asset key, as `list_assets` reports it")}, ["key"]),
+      mutating=True)
+def remove_asset(session: Session, key: str, author: Author = Author.MODEL) -> dict[str, Any]:
+    """The other half of `add_asset`, for a picture that turned out to be the wrong one.
+
+    Refused while anything still names it. Removing a referenced asset would not fail here —
+    it would fail at export, as a `slot_not_written` violation about a slide that looked
+    finished, which is the failure this harness spends its budget gate avoiding. The refusal
+    lists the places, because "it is in use" without saying where leaves the caller to search.
+
+    Bytes are not scarce and this tool is not housekeeping: `export` writes only the media a
+    slide actually references, so an unused asset costs a session some memory and the
+    exported deck nothing at all. What it is for is the ingest a caller wants to take back —
+    a wrong file, a duplicate under a name they would rather reuse.
+    """
+    if key not in session.store.assets:
+        raise ToolError(
+            "no_such_asset",
+            f"the deck is carrying no asset {key!r}. `list_assets` reports the keys it has.",
+        )
+    used = _referenced_by(session, key)
+    if used:
+        raise ToolError(
+            "asset_in_use",
+            f"{key} is still used by {', '.join(used[:6])}"
+            f"{f' and {len(used) - 6} more' if len(used) > 6 else ''}. Point those at "
+            "another asset or remove them first — an asset dropped from under a slide "
+            "exports as a slot the writer could not build.",
+        )
+    content_type, blob = session.store.assets[key]
+    with session.transaction(author) as turn:
+        session.store.write(turn, "delete_asset", f"asset/{key}", {"key": key}, author)
+    return Diff(
+        summary=f"removed asset {key} ({len(blob)} bytes, {content_type})",
+        target=f"asset/{key}",
+        before={"asset_id": key, "media_type": content_type, "bytes": len(blob)},
+    ).as_result()
