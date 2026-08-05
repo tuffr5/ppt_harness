@@ -43,10 +43,38 @@ class ToolCall:
 
 
 @dataclass
+class Usage:
+    """What one model call cost, in one vocabulary.
+
+    Normalised onto Anthropic's split rather than OpenAI's, because the split *is* the
+    measurement: `input_tokens` here always means prompt the endpoint actually processed,
+    never the part it served from cache. OpenAI and DeepSeek report `prompt_tokens`
+    inclusive of their cache hits, so the cached slice is subtracted on the way in —
+    otherwise the same conversation would report two different cache hit rates depending on
+    which address it was sent to, and the number would settle nothing.
+
+    Cache *writes* are Anthropic-only: no OpenAI-compatible endpoint bills for populating a
+    cache, so the field stays zero there rather than being guessed at.
+    """
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+
+    @property
+    def total(self) -> int:
+        return (self.input_tokens + self.output_tokens
+                + self.cache_read_tokens + self.cache_write_tokens)
+
+
+@dataclass
 class ModelTurn:
     reasoning: str = ""
     text: str = ""
     calls: list[ToolCall] = field(default_factory=list)
+    usage: Usage | None = None
+    """`None` when the endpoint reported nothing, which is not the same as reporting zero."""
 
 
 class Provider(ABC):
@@ -59,6 +87,17 @@ class Provider(ABC):
         self.messages: list[Any] = []
         #: Rebuilt once per turn by the agent rather than per round.
         self.tool_cache: list[dict[str, Any]] = []
+        #: One entry per completed `ask`, in order, so a caller counting rounds can line
+        #: round N up with entry N-1 without the loop having to carry tokens through its
+        #: event stream. A call whose usage the endpoint withheld still records a zero
+        #: entry — dropping it would silently shift every later round's cost onto its
+        #: neighbour.
+        self.usage: list[Usage] = []
+
+    def _bill(self, counted: Usage | None) -> Usage | None:
+        """Log what a call cost and hand it back for the turn to carry."""
+        self.usage.append(counted or Usage())
+        return counted
 
     @abstractmethod
     def tools(self, mode: Mode | None) -> list[dict[str, Any]]: ...
@@ -134,7 +173,7 @@ class AnthropicProvider(Provider):
 
         self.messages.append({"role": "assistant", "content": message.content})
 
-        turn = ModelTurn()
+        turn = ModelTurn(usage=self._bill(anthropic_usage(getattr(message, "usage", None))))
         for block in message.content:
             if block.type == "thinking":
                 turn.reasoning += getattr(block, "thinking", "") or ""
@@ -220,7 +259,8 @@ class OpenAIProvider(Provider):
                 for c in calls
             ]
         self.messages.append(entry)
-        return ModelTurn(reasoning=reasoning, text=text, calls=calls)
+        return ModelTurn(reasoning=reasoning, text=text, calls=calls,
+                         usage=self._bill(openai_usage(getattr(response, "usage", None))))
 
     def add_results(self, results: list[tuple[ToolCall, dict[str, Any]]]) -> None:
         for call, result in results:
@@ -262,6 +302,61 @@ class DeepSeekProvider(OpenAIProvider):
         if self._client is None and not self._api_key:
             raise RuntimeError("set DEEPSEEK_API_KEY to use DeepSeek")
         return super().client
+
+
+# ------------------------------------------------------------------------ usage
+#
+# Read off whatever the endpoint volunteered, defensively throughout. A renamed field, a
+# `None` where a count was expected, a response object with no usage on it at all — each
+# costs a metric and must never cost the turn, because nothing downstream of a slide depends
+# on knowing what the slide cost.
+
+
+def _count(source: Any, *names: str) -> int:
+    """The first of `names` that holds a number, whether `source` is a mapping or an object."""
+    for name in names:
+        value = (source.get(name) if isinstance(source, dict)
+                 else getattr(source, name, None))
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            return int(value)
+    return 0
+
+
+def anthropic_usage(raw: Any) -> Usage | None:
+    """Claude's counts, which already carry the split this harness wants."""
+    if raw is None:
+        return None
+    return Usage(
+        input_tokens=_count(raw, "input_tokens"),
+        output_tokens=_count(raw, "output_tokens"),
+        cache_read_tokens=_count(raw, "cache_read_input_tokens"),
+        cache_write_tokens=_count(raw, "cache_creation_input_tokens"),
+    )
+
+
+def openai_usage(raw: Any) -> Usage | None:
+    """The OpenAI-compatible counts, unpicked into the same split.
+
+    `prompt_tokens` is a *total* on this wire format, cache hits included, so the hit has to
+    come back out of it. Two vendors say where the hit is in two places: OpenAI nests
+    `cached_tokens` under `prompt_tokens_details`, DeepSeek puts `prompt_cache_hit_tokens`
+    at the top level. An endpoint that reports neither simply looks like a total cache miss,
+    which is the honest reading — it is also the truth for most local servers.
+    """
+    if raw is None:
+        return None
+    prompt = _count(raw, "prompt_tokens", "input_tokens")
+    details = (raw.get("prompt_tokens_details") if isinstance(raw, dict)
+               else getattr(raw, "prompt_tokens_details", None))
+    cached = _count(details, "cached_tokens") if details is not None else 0
+    cached = cached or _count(raw, "prompt_cache_hit_tokens")
+    return Usage(
+        # Clamped: a partial report where the cached count exceeds the total it was meant to
+        # be part of would otherwise book negative input and drag the whole suite's figure.
+        input_tokens=max(prompt - cached, 0),
+        output_tokens=_count(raw, "completion_tokens", "output_tokens"),
+        cache_read_tokens=cached,
+    )
 
 
 # ---------------------------------------------------------------------- helpers

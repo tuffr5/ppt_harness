@@ -55,19 +55,48 @@ class _Choice:
 
 
 @dataclass
+class _Usage:
+    """OpenAI's shape: `prompt_tokens` is a total with the cache hit already inside it."""
+
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    prompt_tokens_details: Any = None
+
+
+@dataclass
+class _Cached:
+    cached_tokens: int = 0
+
+
+@dataclass
+class _Anthropic:
+    """Claude's shape: the cache counts sit beside `input_tokens`, not inside it."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+
+
+@dataclass
 class _Response:
     choices: list[_Choice]
+    usage: Any = None
 
 
 class FakeClient:
-    def __init__(self, turns: list[_Msg]) -> None:
+    """No usage on the responses — the default an endpoint that reports nothing produces."""
+
+    def __init__(self, turns: list[_Msg], usage: list[Any] | None = None) -> None:
         self._turns = list(turns)
+        self._usage = list(usage or [])
         self.chat = self
         self.completions = self
 
     def create(self, **kw: Any) -> _Response:
         message = self._turns.pop(0) if self._turns else _Msg(content="done")
-        return _Response(choices=[_Choice(message=message)])
+        billed = self._usage.pop(0) if self._usage else None
+        return _Response(choices=[_Choice(message=message)], usage=billed)
 
 
 def _call(name: str, args: dict[str, Any], cid: str = "c1") -> _Call:
@@ -153,6 +182,163 @@ def test_friction_counts_refusals_from_the_event_stream() -> None:
     assert friction.refusal_rate == 0.5
 
 
+def test_friction_without_a_usage_report_is_zero_not_a_crash() -> None:
+    """Most of this suite runs against a scripted client that bills nothing.
+
+    Zero tokens and `None` rates, never an exception — and never a `0.0` cache hit rate,
+    which would read as "the cache never fired" when the truth is that nobody counted.
+    """
+    from ppt_harness.core.loop import Event
+
+    events = [
+        Event(kind="round", round=1),
+        Event(kind="tool_call", tool="add_slide"),
+        Event(kind="tool_result", result={"ok": True}),
+    ]
+    friction = metrics.measure_friction(events, seconds=1.0)
+    friction.landed_slides = 3
+
+    assert friction.tokens == 0
+    assert friction.cache_hit_rate is None
+    assert friction.tokens_per_landed_slide is None
+    assert friction.refused_token_share is None
+    assert friction.tokens_per_repair is None
+    assert friction.rates()["tokens"] == 0
+    assert friction.rates()["cache_hit_rate"] is None
+
+
+def _usage(**kw: int) -> Any:
+    from ppt_harness.core.providers import Usage
+
+    return Usage(**kw)
+
+
+def test_friction_aggregates_the_tokens_the_provider_billed() -> None:
+    """One entry per round, in round order — the join the runner makes by slicing."""
+    from ppt_harness.core.loop import Event
+
+    events = [Event(kind="round", round=1), Event(kind="round", round=2)]
+    friction = metrics.measure_friction(events, seconds=3.0, usage=[
+        _usage(input_tokens=900, output_tokens=200, cache_write_tokens=4000),
+        _usage(input_tokens=100, output_tokens=50, cache_read_tokens=4000),
+    ])
+
+    assert friction.input_tokens == 1000
+    assert friction.output_tokens == 250
+    assert friction.cache_write_tokens == 4000
+    assert friction.cache_read_tokens == 4000
+    assert friction.tokens == 9250
+    # Over prompt tokens only: completions are never served from a cache, and including
+    # them would let a chatty turn depress a hit rate the cache had nothing to do with.
+    assert friction.cache_hit_rate == pytest.approx(4000 / 9000)
+
+    friction.landed_slides = 5
+    assert friction.tokens_per_landed_slide == pytest.approx(1850.0)
+
+
+def test_a_refused_write_is_charged_its_share_of_the_round_that_made_it() -> None:
+    """Principle 3 as arithmetic. Two calls in a round, one refused: half that round.
+
+    The round that only summarises is charged to nobody — it bought no tool calls, so
+    attributing it to the refusal would inflate the very number that is meant to test
+    whether refusals are cheap.
+    """
+    from ppt_harness.core.loop import Event
+
+    events = [
+        Event(kind="round", round=1),
+        Event(kind="tool_call", tool="add_slide"),
+        Event(kind="tool_result", result={"ok": False, "error": "budget_exceeded"}),
+        Event(kind="tool_call", tool="add_slide"),
+        Event(kind="tool_result", result={"ok": True}),
+        Event(kind="round", round=2),
+        Event(kind="tool_call", tool="repair"),
+        Event(kind="tool_result", result={"ok": True}),
+        Event(kind="round", round=3),
+    ]
+    friction = metrics.measure_friction(events, seconds=9.0, usage=[
+        _usage(input_tokens=800, output_tokens=200),      # round 1: 1000 over two calls
+        _usage(input_tokens=400, output_tokens=100),      # round 2: 500 on one repair
+        _usage(input_tokens=200, output_tokens=50),       # round 3: no calls, nobody's
+    ])
+
+    assert friction.refused_tokens == pytest.approx(500.0)
+    assert friction.repair_tokens == pytest.approx(500.0)
+    assert friction.tokens == 1750
+    assert friction.refused_token_share == pytest.approx(500 / 1750)
+    assert friction.tokens_per_repair == pytest.approx(500.0)
+
+
+def test_a_turn_that_never_repaired_reports_no_repair_cost() -> None:
+    """Zero would be a claim that repairs are free rather than that none happened."""
+    from ppt_harness.core.loop import Event
+
+    friction = metrics.measure_friction(
+        [Event(kind="round", round=1)], seconds=1.0,
+        usage=[_usage(input_tokens=100, output_tokens=10)])
+
+    assert friction.repairs == 0
+    assert friction.tokens_per_repair is None
+    assert friction.refused_token_share == 0.0, "measured, and it really was nothing"
+
+
+def test_usage_is_read_off_each_wire_format_and_normalised() -> None:
+    """The two formats disagree about whether `prompt_tokens` includes the cache hit.
+
+    Unnormalised, the same conversation would report two different cache hit rates
+    depending on which address it went to, and the figure would settle nothing.
+    """
+    from ppt_harness.core import providers
+
+    claude = providers.anthropic_usage(_Anthropic(input_tokens=120, output_tokens=40,
+                                                  cache_read_input_tokens=6000,
+                                                  cache_creation_input_tokens=0))
+    assert claude == _usage(input_tokens=120, output_tokens=40, cache_read_tokens=6000)
+
+    openai = providers.openai_usage(_Usage(prompt_tokens=6120, completion_tokens=40,
+                                           prompt_tokens_details=_Cached(cached_tokens=6000)))
+    assert openai == claude, "the same turn has to count the same on either wire"
+
+    deepseek = providers.openai_usage({"prompt_tokens": 6120, "completion_tokens": 40,
+                                       "prompt_cache_hit_tokens": 6000})
+    assert deepseek == claude, "DeepSeek names the hit at the top level; same reading"
+
+
+def test_a_partial_or_absent_usage_report_never_breaks_a_turn() -> None:
+    """Telemetry is not the answer. A renamed field costs a metric, never a slide."""
+    from ppt_harness.core import providers
+
+    assert providers.anthropic_usage(None) is None
+    assert providers.openai_usage(None) is None
+    # A total that is somehow smaller than the cache hit inside it would book negative
+    # input and drag the whole suite's figure below zero.
+    assert providers.openai_usage({"prompt_tokens": 10,
+                                   "prompt_cache_hit_tokens": 99}).input_tokens == 0
+    assert providers.openai_usage({"prompt_tokens": None}).total == 0
+    assert providers.openai_usage(object()).total == 0
+
+
+def test_the_usage_log_stays_aligned_with_the_rounds_it_bills() -> None:
+    """Entry `i` is round `i + 1`, and a silent call has to hold its place.
+
+    Dropping the unreported call instead would shift every later round's cost one place
+    back, so a refusal in round three would be charged whatever round four spent — a
+    misattribution nothing downstream could detect.
+    """
+    from ppt_harness.core import providers
+
+    client = FakeClient([_Msg(content="a"), _Msg(content="b"), _Msg(content="c")],
+                        usage=[_Usage(prompt_tokens=100, completion_tokens=10),
+                               None,
+                               _Usage(prompt_tokens=300, completion_tokens=30)])
+    provider = providers.OpenAIProvider("fake", client=client)
+    turns = [provider.ask("system") for _ in range(3)]
+
+    assert [u.total for u in provider.usage] == [110, 0, 330]
+    assert turns[1].usage is None, "nothing reported is not the same as nothing spent"
+    assert turns[2].usage is not None and turns[2].usage.input_tokens == 300
+
+
 def test_shape_counts_what_was_built(populated: Session) -> None:
     shape = metrics.measure_shape(populated)
     assert shape.components.get("bullets", 0) >= 1
@@ -186,6 +372,59 @@ def test_a_task_runs_end_to_end_without_a_model(tmp_path: Path) -> None:
     assert Path(result.artifacts["pptx"]).exists()
     assert (tmp_path / "scripted" / "result.json").exists()
     assert result.measurements["fit"]["fit_rate"] == 1.0
+
+
+def test_a_run_carries_what_it_cost_through_to_the_measurements(tmp_path: Path) -> None:
+    """The whole point: tokens billed on the wire come out the other end as a rate.
+
+    Two rounds, one refused write, and the deck that survived it — so every derived figure
+    has both of its ends measured rather than assumed.
+    """
+    task = Task(id="billed", kind="generate", brief="Build one slide about EMEA churn now.")
+    client = FakeClient(
+        [_Msg(tool_calls=[_call("add_slide", ONE_SLIDE)]),
+         _Msg(tool_calls=[_call("set_text", {"target": "nope/x", "text": "y"}, "c2")]),
+         _Msg(content="Built one slide.")],
+        usage=[_Usage(prompt_tokens=5000, completion_tokens=200,
+                      prompt_tokens_details=_Cached(cached_tokens=4000)),
+               _Usage(prompt_tokens=5200, completion_tokens=100,
+                      prompt_tokens_details=_Cached(cached_tokens=5000)),
+               _Usage(prompt_tokens=5400, completion_tokens=60,
+                      prompt_tokens_details=_Cached(cached_tokens=5000))],
+    )
+
+    result = runner.run_task(task, tmp_path / "billed", client=client)
+    friction = result.measurements["friction"]
+
+    assert friction["tokens"] == 5200 + 5300 + 5460
+    assert friction["cache_read_tokens"] == 14000
+    assert friction["cache_hit_rate"] == pytest.approx(14000 / 15600, abs=1e-4)
+    # One slide landed, so the per-slide figure is the whole bill.
+    assert friction["tokens_per_landed_slide"] == pytest.approx(friction["tokens"], abs=0.5)
+    # Round two spent 5300 on a single call, and that call was refused.
+    assert friction["refused_tokens"] == pytest.approx(5300.0)
+    assert friction["refused_token_share"] == pytest.approx(5300 / friction["tokens"], abs=1e-4)
+    assert result.turns[0].tokens == friction["tokens"]
+
+    written = json.loads((tmp_path / "billed" / "result.json").read_text())
+    assert written["measurements"]["friction"]["tokens"] == friction["tokens"]
+    assert written["turns"][0]["tokens"] == friction["tokens"]
+
+
+def test_a_scripted_run_reports_no_tokens_rather_than_free_ones(tmp_path: Path) -> None:
+    """The suite's own default. No usage on the wire must not read as a costless run."""
+    task = Task(id="silent", kind="generate", brief="Build one slide about EMEA churn now.")
+    client = FakeClient([_Msg(tool_calls=[_call("add_slide", ONE_SLIDE)]),
+                         _Msg(content="Built one slide.")])
+
+    result = runner.run_task(task, tmp_path / "silent", client=client)
+    friction = result.measurements["friction"]
+
+    assert result.ok
+    assert friction["tokens"] == 0
+    assert friction["cache_hit_rate"] is None
+    assert friction["tokens_per_landed_slide"] is None
+    assert friction["refused_token_share"] is None
 
 
 def test_a_missed_expectation_is_reported_not_hidden(tmp_path: Path) -> None:
@@ -253,6 +492,57 @@ def test_the_scorecard_keeps_its_denominators() -> None:
                                        "expectations": r.expectations,
                                        **r.measurements} for r in results]})
     assert "4/5" in body and "0.800" in body
+
+
+def test_the_scorecard_sums_tokens_and_keeps_their_denominators() -> None:
+    """A suite figure that disagreed with the tasks it sums is the bug this file guards."""
+    results = [
+        runner.Result(task="a", kind="generate", ok=True,
+                      measurements={"fit": {"slides": 4, "clean_slides": 4},
+                                    "friction": {"refusals": 1, "tool_calls": 10,
+                                                 "repairs": 2, "input_tokens": 1000,
+                                                 "output_tokens": 400,
+                                                 "cache_read_tokens": 8000,
+                                                 "cache_write_tokens": 600,
+                                                 "refused_tokens": 500.0,
+                                                 "repair_tokens": 900.0}}),
+        runner.Result(task="b", kind="generate", ok=True,
+                      measurements={"fit": {"slides": 1, "clean_slides": 1},
+                                    "friction": {"refusals": 0, "tool_calls": 2,
+                                                 "repairs": 0, "input_tokens": 500,
+                                                 "output_tokens": 100,
+                                                 "cache_read_tokens": 2000,
+                                                 "cache_write_tokens": 0,
+                                                 "refused_tokens": 0.0,
+                                                 "repair_tokens": 0.0}}),
+    ]
+    card = report.score(results).as_dict()
+
+    assert card["tokens"] == 12600
+    # Over the suite's slides, the same "not the mean of per-deck rates" choice fit_rate
+    # makes — five slides cost 12,600 tokens between them.
+    assert card["tokens_per_landed_slide"] == pytest.approx(2520.0)
+    assert card["cache_hit_rate"] == pytest.approx(10000 / 12100, abs=1e-4)
+    assert card["refused_token_share"] == pytest.approx(500 / 12600, abs=1e-4)
+    assert card["tokens_per_repair"] == pytest.approx(450.0)
+
+    body = report.markdown({"suite": "t", "environment": report.environment("m"),
+                            "scorecard": card, "tasks": []})
+    assert "12,600" in body, "the total is printed beside the rates derived from it"
+    assert "over 5 slides" in body, "every figure carries its denominator"
+    assert "2 repairs" in body
+
+
+def test_a_suite_nobody_billed_says_so_rather_than_printing_zeroes() -> None:
+    """A table of zeroes reads as "this run was free", not "nobody was counting"."""
+    card = report.Scorecard(tasks=1, ran=1, slides=3, clean_slides=3).as_dict()
+    body = report.markdown({"suite": "t", "environment": report.environment("m"),
+                            "scorecard": card, "tasks": []})
+
+    assert card["tokens"] == 0
+    assert card["cache_hit_rate"] is None
+    assert "not reported by this endpoint" in body
+    assert "Tokens per landed slide" not in body
 
 
 def test_the_environment_is_recorded() -> None:

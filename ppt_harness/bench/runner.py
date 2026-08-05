@@ -39,6 +39,8 @@ class TurnRecord:
     reply: str = ""
     error: str = ""
     seconds: float = 0.0
+    tokens: int = 0
+    """Everything billed for this turn, or 0 where the endpoint reported nothing."""
 
 
 @dataclass
@@ -115,10 +117,16 @@ def run_task(task: Task, out_dir: Path, *, model: str | None = None,
     result.model = agent.model
 
     friction = metrics.Friction()
+    # A reference to the provider's running token log, not a copy — it grows as the turns
+    # run and each turn is the slice appended while it was in flight. `getattr` because a
+    # caller may inject a provider stub of its own, and a benchmark that cannot be run
+    # without token telemetry is a benchmark that cannot be run offline.
+    billing: list[Any] = getattr(agent.provider, "usage", [])
     for prompt in task.turns:
         record = TurnRecord(prompt=prompt)
         started = time.monotonic()
         events: list[Any] = []
+        billed_before = len(billing)
         try:
             for event in agent.run(prompt):
                 events.append(event)
@@ -134,12 +142,22 @@ def run_task(task: Task, out_dir: Path, *, model: str | None = None,
             record.error = f"{type(exc).__name__}: {exc}"
 
         record.seconds = round(time.monotonic() - started, 1)
-        turn_friction = metrics.measure_friction(events, record.seconds)
+        turn_friction = metrics.measure_friction(events, record.seconds,
+                                                 billing[billed_before:])
         record.rounds = turn_friction.rounds
+        record.tokens = turn_friction.tokens
         friction.rounds += turn_friction.rounds
         friction.tool_calls += turn_friction.tool_calls
         friction.refusals += turn_friction.refusals
         friction.repairs += turn_friction.repairs
+        friction.input_tokens += turn_friction.input_tokens
+        friction.output_tokens += turn_friction.output_tokens
+        friction.cache_read_tokens += turn_friction.cache_read_tokens
+        friction.cache_write_tokens += turn_friction.cache_write_tokens
+        friction.refused_tokens = round(
+            friction.refused_tokens + turn_friction.refused_tokens, 1)
+        friction.repair_tokens = round(
+            friction.repair_tokens + turn_friction.repair_tokens, 1)
         friction.seconds = round(friction.seconds + record.seconds, 1)
         for code, count in turn_friction.refusal_codes.items():
             friction.refusal_codes[code] = friction.refusal_codes.get(code, 0) + count
@@ -153,6 +171,9 @@ def run_task(task: Task, out_dir: Path, *, model: str | None = None,
         shape = metrics.measure_shape(session)
         integrity = metrics.measure_integrity(session, out_dir / "deck.pptx",
                                               original=original)
+        # The token denominator, and it has to come from here: the turns knew what they
+        # spent, only the finished deck knows what that bought.
+        friction.landed_slides = fit.slides
         result.measurements = metrics.as_dict(fit, friction, integrity, shape)
         result.expectations = _check(task, session, fit, shape)
         result.ok = integrity.exported and not any(t.error for t in result.turns)
@@ -177,7 +198,8 @@ def _result_json(result: Result) -> dict[str, Any]:
         "measurements": result.measurements,
         "artifacts": result.artifacts,
         "turns": [{"prompt": t.prompt, "rounds": t.rounds, "seconds": t.seconds,
-                   "tools": t.tool_calls, "refusals": t.refusals, "error": t.error}
+                   "tokens": t.tokens, "tools": t.tool_calls, "refusals": t.refusals,
+                   "error": t.error}
                   for t in result.turns],
     }
 

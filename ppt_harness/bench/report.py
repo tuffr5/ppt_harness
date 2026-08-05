@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .metrics import Friction
 from .runner import Result
 
 
@@ -34,18 +35,42 @@ class Scorecard:
     refusals: int = 0
     tool_calls: int = 0
     rounds: int = 0
+    repairs: int = 0
     seconds: float = 0.0
     review_findings: int = 0
     violations: int = 0
     parts_lost: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    refused_tokens: float = 0.0
+    repair_tokens: float = 0.0
+
+    def _friction(self) -> Friction:
+        """The suite total wearing a task's clothes.
+
+        Every token rate the scorecard publishes is defined once, in `metrics.Friction`, and
+        borrowed here rather than reimplemented — a suite figure that disagreed with the sum
+        of the tasks under it is the exact bug this file's second rule exists to prevent.
+        Slides across the whole suite are the landed-slide denominator, which is the same
+        "over slides, not over tasks" choice `fit_rate` makes below.
+        """
+        return Friction(
+            tool_calls=self.tool_calls, refusals=self.refusals, repairs=self.repairs,
+            input_tokens=self.input_tokens, output_tokens=self.output_tokens,
+            cache_read_tokens=self.cache_read_tokens,
+            cache_write_tokens=self.cache_write_tokens,
+            refused_tokens=self.refused_tokens, repair_tokens=self.repair_tokens,
+            landed_slides=self.slides,
+        )
 
     def as_dict(self) -> dict[str, Any]:
         out = vars(self).copy()
         out["fit_rate"] = round(self.fit_rate, 4)
-        out["refusal_rate"] = (round(self.refusals / self.tool_calls, 4)
-                               if self.tool_calls else 0.0)
         out["findings_per_slide"] = (round(self.review_findings / self.slides, 2)
                                      if self.slides else 0.0)
+        out.update(self._friction().rates())
         return out
 
 
@@ -69,7 +94,14 @@ def score(results: list[Result]) -> Scorecard:
         card.refusals += friction.get("refusals", 0)
         card.tool_calls += friction.get("tool_calls", 0)
         card.rounds += friction.get("rounds", 0)
+        card.repairs += friction.get("repairs", 0)
         card.seconds += friction.get("seconds", 0.0)
+        card.input_tokens += friction.get("input_tokens", 0)
+        card.output_tokens += friction.get("output_tokens", 0)
+        card.cache_read_tokens += friction.get("cache_read_tokens", 0)
+        card.cache_write_tokens += friction.get("cache_write_tokens", 0)
+        card.refused_tokens += friction.get("refused_tokens", 0.0)
+        card.repair_tokens += friction.get("repair_tokens", 0.0)
         card.review_findings += shape.get("review_findings", 0)
         card.violations += len(integrity.get("violations", []))
         card.parts_lost += len(integrity.get("parts_lost", []))
@@ -78,6 +110,8 @@ def score(results: list[Result]) -> Scorecard:
     # twelve-slide one, which is how a benchmark ends up rewarding short decks.
     card.fit_rate = card.clean_slides / card.slides if card.slides else 0.0
     card.seconds = round(card.seconds, 1)
+    card.refused_tokens = round(card.refused_tokens, 1)
+    card.repair_tokens = round(card.repair_tokens, 1)
     return card
 
 
@@ -119,6 +153,48 @@ def write(results: list[Result], out_dir: Path, *, suite: str, model: str = "") 
     return path
 
 
+def _plural(count: int, noun: str) -> str:
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def _share(value: Any) -> str:
+    """A rate the endpoint may never have given us. Rule one: never print a guess as a fact."""
+    return "not reported" if value is None else f"{value:.1%}"
+
+
+def _cost(card: dict[str, Any]) -> list[str]:
+    """The token rows, or one row saying why there are none.
+
+    Split out because the missing case is the common one: the deterministic half of this
+    suite runs against a scripted client with no endpoint behind it, and a table of zeroes
+    would read as "this run was free" rather than "nobody was counting".
+    """
+    tokens = card.get("tokens") or 0
+    if not tokens:
+        return ["| Tokens | not reported by this endpoint |"]
+    per_slide = card.get("tokens_per_landed_slide")
+    per_repair = card.get("tokens_per_repair")
+    rows = [
+        f"| Tokens | {tokens:,} "
+        f"(in {card['input_tokens']:,} · out {card['output_tokens']:,} · "
+        f"cache read {card['cache_read_tokens']:,} · "
+        f"cache write {card['cache_write_tokens']:,}) |",
+        f"| Tokens per landed slide | "
+        f"{'—' if per_slide is None else format(per_slide, ',.0f')} "
+        f"over {card['slides']} slides |",
+        f"| Prompt served from cache | {_share(card.get('cache_hit_rate'))} of "
+        f"{card['input_tokens'] + card['cache_read_tokens'] + card['cache_write_tokens']:,} "
+        "prompt tokens |",
+        f"| Tokens on refused writes | {card['refused_tokens']:,.0f} "
+        f"({_share(card.get('refused_token_share'))} of all tokens, over "
+        f"{_plural(card['refusals'], 'refusal')}) |",
+        f"| Tokens per repair | "
+        f"{'—' if per_repair is None else format(per_repair, ',.0f')} "
+        f"over {_plural(card['repairs'], 'repair')} |",
+    ]
+    return rows
+
+
 def markdown(payload: dict[str, Any]) -> str:
     card = payload["scorecard"]
     env = payload["environment"]
@@ -134,7 +210,9 @@ def markdown(payload: dict[str, Any]) -> str:
         "slides fit their boxes) |",
         f"| Refused writes | {card['refusals']} of {card['tool_calls']} tool calls "
         f"({card['refusal_rate']:.1%}) |",
-        f"| Repairs and rounds | {card['rounds']} rounds |",
+        f"| Repairs and rounds | {_plural(card['repairs'], 'repair')} over "
+        f"{_plural(card['rounds'], 'round')} |",
+        *_cost(card),
         f"| Editorial findings | {card['review_findings']} "
         f"({card['findings_per_slide']} per slide) |",
         f"| Export violations | {card['violations']} |",
@@ -144,25 +222,30 @@ def markdown(payload: dict[str, Any]) -> str:
         f"Model **{env['model'] or 'unset'}** · {env['platform']} · Python {env['python']} · "
         f"renderer {env['reference_renderer'] or 'none'}. Produced {env['when']}.",
         "",
-        "Fit, refusals and parts are measured, not judged — they mean the same thing on "
-        "every run. Nothing here says the deck is *good*; run `bench adapters` to submit "
-        "these same artifacts to a benchmark that judges that.",
+        "Fit, refusals, tokens and parts are measured, not judged — they mean the same "
+        "thing on every run. Tokens come from what the endpoint billed, so they move with "
+        "the model and the prompt and are only comparable against a run of the same both. "
+        "Nothing here says the deck is *good*; run `bench adapters` to submit these same "
+        "artifacts to a benchmark that judges that.",
         "",
         "## Tasks",
         "",
-        "| task | kind | ran | met | slides | fit | refusals | findings |",
-        "|---|---|---|---|---|---|---|---|",
+        "| task | kind | ran | met | slides | fit | refusals | tokens/slide | findings |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     for task in payload["tasks"]:
         fit = task.get("fit", {})
         friction = task.get("friction", {})
         shape = task.get("shape", {})
         missed = [k for k, v in (task.get("expectations") or {}).items() if not v]
+        per_slide = friction.get("tokens_per_landed_slide")
         lines.append(
             f"| {task['task']} | {task['kind']} | {'yes' if task['ok'] else 'NO'} | "
             f"{'yes' if task['met'] else ('missed ' + ', '.join(missed) if missed else 'NO')} | "
             f"{fit.get('slides', 0)} | {fit.get('fit_rate', 0):.2f} | "
-            f"{friction.get('refusals', 0)} | {shape.get('review_findings', 0)} |"
+            f"{friction.get('refusals', 0)} | "
+            f"{'—' if per_slide is None else format(per_slide, ',.0f')} | "
+            f"{shape.get('review_findings', 0)} |"
         )
     failed = [t for t in payload["tasks"] if t.get("error")]
     if failed:
