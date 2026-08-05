@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
+from conftest import DEMO
 from fastapi.testclient import TestClient
 
 from ppt_harness.adapters.web import create_app
@@ -814,3 +815,47 @@ def test_the_context_block_names_the_template(fixture_deck) -> None:
     assert fixture_deck.name in block
     assert "no slides did" in block
     assert "Components:" in block, "an empty deck can only be built from components"
+
+
+# ----------------------------------------------------------------------- the picker
+
+
+def test_the_picker_stops_asking_once_it_is_answered() -> None:
+    """The bug a click reported as "it does nothing".
+
+    A deck started from a card is empty *by definition*, so a dismissal keyed on slide count
+    was false again the instant it was answered: the page reloaded, the picker saw an empty
+    deck and offered itself a second time. The question is whether the person has said which
+    deck they are working on, not whether that deck has anything in it yet.
+    """
+    client = TestClient(create_app(Session.blank("Untitled")))
+    assert client.get("/api/templates").json()["started"] is False
+
+    started = client.post("/api/start", json={"template": "slate"})
+    assert started.status_code == 200
+    assert started.json()["theme"] == "slate"
+    assert client.get("/api/templates").json()["started"] is True, \
+        "the picker offered itself again after being answered"
+
+
+@pytest.mark.parametrize("make,why", [
+    (lambda: Session.from_builtin("slate", "T"), "--template named a theme"),
+    (lambda: Session.open(DEMO), "a named deck brought its own slides"),
+])
+def test_a_choice_made_at_the_command_line_is_not_asked_again(make, why: str) -> None:
+    """Every way in except a bare `serve` arrives already answered, and the browser has no
+    business re-opening a question the command line settled."""
+    client = TestClient(create_app(make()))
+    assert client.get("/api/templates").json()["started"] is True, why
+
+
+def test_starting_over_swaps_the_deck_the_whole_app_is_looking_at() -> None:
+    """`nonlocal` reaches every route's closure at once, so nothing keeps serving the old
+    deck — the outline, the theme and the preview version all have to move together."""
+    client = TestClient(create_app(Session.from_builtin("editorial", "T")))
+    client.post("/api/start", json={"template": "signal", "title": "Fresh"})
+
+    outline = client.get("/api/outline").json()
+    assert outline["template"] == "signal (built in)"
+    assert outline["deck"] == "Fresh"
+    assert client.get("/api/theme").json()["palette"]["brand"] == "#0F766E"

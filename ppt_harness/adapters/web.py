@@ -52,7 +52,19 @@ def create_app(session: Session, *, model: str | None = None,
         agent_kw["model"] = model
     if base_url:
         agent_kw["base_url"] = base_url
-    state: dict[str, Any] = {"agent": Agent(session, **agent_kw)}
+    # Whether the person has said which deck they are working on — *not* whether the deck has
+    # anything in it yet. The picker asks a question, and it has to stop asking once it has
+    # been answered: a deck started from a card is empty by definition, so a dismissal keyed
+    # on slide count put the picker straight back on screen and the click read as broken.
+    #
+    # Everything except a bare `serve` arrives already answered: a named deck brought its own
+    # slides, `--from` and `--template` named a theme, and each of those is a choice made at
+    # the command line that the browser has no business asking about again.
+    state: dict[str, Any] = {
+        "agent": Agent(session, **agent_kw),
+        "chosen": bool(session.deck.slides or session.deck.source_path
+                       or session.deck.theme_from),
+    }
     # The preview is the export, rendered. Warmed in the background so opening a deck is
     # not a stall; a person waits ~1s once, and never for measurement.
     cache = preview.PreviewCache(session)
@@ -256,7 +268,7 @@ def create_app(session: Session, *, model: str | None = None,
                 for t in templates.catalog()
             ],
             "current": session.deck.theme_from,
-            "started": bool(session.deck.slides),
+            "started": state["chosen"],
         }
 
     @app.get("/api/templates/{name}/thumb.png")
@@ -320,6 +332,7 @@ def create_app(session: Session, *, model: str | None = None,
             raise HTTPException(404, str(exc)) from exc
         cache = preview.PreviewCache(session)
         state["agent"] = Agent(session, **agent_kw)
+        state["chosen"] = True
         threading.Thread(target=cache.warm, daemon=True).start()
         return session.outline()
 
