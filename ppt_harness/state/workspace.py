@@ -11,7 +11,9 @@ possible rather than merely likely:
   parse rather than a replay.
 - `journal.jsonl` is the **history**. One line per committed turn, carrying the ops *and
   their inverses*, so undo still works after a restart — the log is the only place that
-  knows how to walk backwards.
+  knows how to walk backwards. Undo and redo append a line of their own (`{"event": …}`),
+  because a turn that was taken back off the deck must not be re-applied by a replay: a
+  journal that records only the forward turns brings an undone mistake back on restart.
 - `assets/` holds the picture bytes, which are deliberately not part of the document model
   (see `DeckStore.assets`) and would otherwise be lost on any restore.
 
@@ -38,7 +40,24 @@ from .store import DeckStore
 
 #: Bumped when the on-disk shape changes in a way an older harness cannot read. A workspace
 #: from the future is left alone rather than half-understood.
-FORMAT = 1
+#:
+#: 2 — the journal gained `{"event": "undo"|"redo", "turn": n}` records. A format-1 reader
+#: stops at the first one (it is not a turn line), which costs it the history after that
+#: point but never makes it *apply* an undone turn, so the failure stays on the safe side.
+FORMAT = 2
+
+#: Journal record kinds that move the live frontier rather than adding ops, and the
+#: `committed` state each one leaves the turn it names in.
+_EVENTS = {"undo": False, "redo": True}
+
+
+def _touches_assets(turn: Turn) -> bool:
+    """Did this turn change which pictures exist?
+
+    Asked on the way forward *and* on the way back: undoing an `add_asset` drops the key,
+    and an `assets/index.json` still naming it resurrects the picture on the next restore.
+    """
+    return any(op.op in ("add_asset", "delete_asset") for op in turn.ops)
 
 
 class WorkspaceError(RuntimeError):
@@ -129,6 +148,10 @@ class Workspace:
         """
         self.save_assets(store)
         store.on_commit = lambda turn: self.record(store, turn)
+        # Undo and redo move the deck too, so they persist by the same route. Wiring them
+        # here rather than inside `DeckStore.undo` keeps the store ignorant of the disk.
+        store.on_undo = lambda turn: self.record_event(store, "undo", turn)
+        store.on_redo = lambda turn: self.record_event(store, "redo", turn)
 
     def record(self, store: DeckStore, turn: Turn) -> None:
         """One committed turn: append the history, then replace the state.
@@ -144,22 +167,45 @@ class Workspace:
         op names tell us cheaply, so the common turn still pays nothing.
         """
         self.append(turn)
-        if any(op.op in ("add_asset", "delete_asset") for op in turn.ops):
+        if _touches_assets(turn):
+            self.save_assets(store)
+        self.save_deck(store.deck)
+
+    def record_event(self, store: DeckStore, event: str, turn: Turn) -> None:
+        """One undo or redo: append the fact, then replace the state.
+
+        The same shape as `record`, and for the same reason. Journal first: a crash between
+        the two leaves a snapshot one *event* stale next to a journal that already knows the
+        turn is dead, which is the same recoverable loss a crash mid-`record` leaves — the
+        opposite order would leave a deck that moved with no record of why.
+
+        A re-snapshot alone would not do. `restore` falls back to replaying the journal onto
+        the source file when neither snapshot parses, and a journal holding only the forward
+        turns replays the undone one straight back in.
+        """
+        self._append_line({"event": event, "turn": turn.id})
+        if _touches_assets(turn):
             self.save_assets(store)
         self.save_deck(store.deck)
 
     def append(self, turn: Turn) -> None:
         if not turn.ops:
             return
-        line = json.dumps(
-            {"turn": turn.id, "ops": [op.model_dump(mode="json") for op in turn.ops]},
-            ensure_ascii=False,
-        )
+        self._append_line({"turn": turn.id,
+                           "ops": [op.model_dump(mode="json") for op in turn.ops]})
+        self._journal_turns.add(turn.id)
+
+    def _append_line(self, entry: dict[str, Any]) -> None:
+        """One journal record, durably.
+
+        The `fsync` is the whole point of appending separately from the snapshot: the
+        history has to be on the platter before the state that depends on it is replaced.
+        """
+        line = json.dumps(entry, ensure_ascii=False)
         with open(self.journal, "a", encoding="utf-8") as handle:
             handle.write(line + "\n")
             handle.flush()
             os.fsync(handle.fileno())
-        self._journal_turns.add(turn.id)
 
     def save_deck(self, deck: Deck) -> None:
         # Keep the last good snapshot before overwriting: `os.replace` protects against a
@@ -198,24 +244,41 @@ class Workspace:
     # -- reading ----------------------------------------------------------------
 
     def turns(self) -> list[Turn]:
-        """Committed history, with a truncated final line dropped.
+        """Recorded history in order, each turn flagged with whether it is still live.
 
-        A half-written last line is the signature of a crash mid-append. That turn had not
-        finished being recorded, so discarding it restores the deck to the last state that
-        was actually complete.
+        A turn line adds a turn; an `event` line moves one that is already here on or off
+        the deck. Both are replayed in file order, so `committed` ends up saying what the
+        last process left behind — a turn that was undone comes back `committed=False`, and
+        a caller applying ops must skip it.
+
+        A half-written last line is the signature of a crash mid-append. That record had not
+        finished being written, so discarding it restores the deck to the last state that
+        was actually complete — and that holds for an undo record exactly as it does for a
+        turn: losing it means the undo never happened, which is where the snapshot is too.
         """
         if not self.journal.is_file():
             return []
         out: list[Turn] = []
+        by_id: dict[int, Turn] = {}
         for line in self.journal.read_text(encoding="utf-8", errors="replace").splitlines():
             line = line.strip()
             if not line:
                 continue
             try:
                 entry = json.loads(line)
-                out.append(Turn(id=entry["turn"],
-                                ops=[Op.model_validate(o) for o in entry["ops"]],
-                                committed=True))
+                if not isinstance(entry, dict):
+                    raise TypeError("a journal record is an object")
+                if "event" in entry:
+                    # An event names a turn this journal has already introduced. One that
+                    # does not cannot be placed in the order, so it falls to the same
+                    # treatment as any other unreadable line.
+                    by_id[entry["turn"]].committed = _EVENTS[entry["event"]]
+                    continue
+                turn = Turn(id=entry["turn"],
+                            ops=[Op.model_validate(o) for o in entry["ops"]],
+                            committed=True)
+                out.append(turn)
+                by_id[turn.id] = turn
             except (json.JSONDecodeError, KeyError, TypeError, ValueError):
                 # Only the tail can be damaged by an interrupted append; a bad line in the
                 # middle means something else wrote here, and replaying past it would apply
@@ -255,10 +318,19 @@ class Workspace:
         a journal because both snapshots were unreadable, is holding a deck that may be a
         turn behind what the user last saw — and the only wrong move is to present it as if
         nothing happened.
+
+        Both the undo *and* the redo stack come back: the journal keeps an undone turn's ops
+        and records only that it stopped being live, so a restart lands exactly where the
+        user left off and redo still has something to offer.
         """
         recovered = self._deck_from_disk()
         history = self.turns()
-        report: dict[str, Any] = {"resumed": True, "turns": len(history), "degraded": False}
+        # Live turns, not recorded ones. "resumed 6 turns" is read by a person, and counting
+        # turns that same person undid describes the file rather than their deck.
+        live = [t for t in history if t.committed]
+        report: dict[str, Any] = {"resumed": True, "turns": len(live), "degraded": False}
+        if len(live) != len(history):
+            report["undone"] = len(history) - len(live)
 
         if recovered is not None:
             deck, origin = recovered
@@ -278,12 +350,15 @@ class Workspace:
             # leaves the bytes outside the log, so replaying one finds its picture only if
             # what was written to `assets/` is already loaded.
             store.assets.update(self.load_assets())
-            for turn in history:
+            # Live turns only. An undone turn is still on file — its ops are what redo puts
+            # back — but applying it here hands the user the mistake they took out, and this
+            # is the path where the journal is the *only* source of truth.
+            for turn in live:
                 for op in turn.ops:
                     store._apply(op)
-            store.log.restore(history)
+            store.restore_history(history)
             report.update({"from": "journal", "degraded": True,
-                           "note": f"no readable snapshot; replayed {len(history)} turns "
+                           "note": f"no readable snapshot; replayed {len(live)} turns "
                                    "onto the source file"})
             return store, report
         else:
@@ -293,9 +368,11 @@ class Workspace:
 
         store = DeckStore(deck)
         store.assets.update(self.load_assets())
-        # History restored so undo still reaches back past the restart. The ops carry their
-        # own inverses, so walking backwards needs nothing the snapshot could have lost.
-        store.log.restore(history)
+        # History restored so undo still reaches back past the restart, and so does redo:
+        # the undone turns are on file with their ops, and `restore_history` rebuilds the
+        # stack from them. The ops carry their own inverses, so walking backwards needs
+        # nothing the snapshot could have lost.
+        store.restore_history(history)
         self._journal_turns = {t.id for t in history}
         return store, report
 

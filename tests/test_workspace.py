@@ -27,14 +27,22 @@ def _edit(session: Session, text: str) -> None:
                     {"target": f"{slide.id}/{slide.blocks[0].id}/title", "text": text})
 
 
+def _add_slide(session: Session, title: str) -> None:
+    router.dispatch(session, "add_slide", {
+        "layout": "stack",
+        "blocks": [{"region": "header", "component": "slide_title",
+                    "slots": {"title": title}}]})
+
+
+def _titles(store) -> list[str]:
+    return [s.blocks[0].slots["title"] for s in store.deck.slides]
+
+
 def _deck_with_a_title(tmp_path) -> tuple[Session, Workspace]:
     session = Session.blank("Persisted")
     workspace = Workspace(tmp_path / "ws")
     workspace.attach(session.store)
-    router.dispatch(session, "add_slide", {
-        "layout": "stack",
-        "blocks": [{"region": "header", "component": "slide_title",
-                    "slots": {"title": "First"}}]})
+    _add_slide(session, "First")
     return session, workspace
 
 
@@ -232,6 +240,171 @@ def test_block_level_writes_are_journalled(tmp_path, tool, args, check) -> None:
 
     store, _ = Workspace(tmp_path / "ws").restore()
     assert check(store.deck.slides[0].blocks[0]) == next(iter(args.values()))
+
+
+# ------------------------------------------------- undo, which the deck also has to survive
+
+
+def test_an_undone_turn_does_not_come_back_after_a_restart(tmp_path) -> None:
+    """The bug this whole section exists for. `undo` moved the deck and notified nothing, so
+    the journal and the snapshot both still described the turn as live — and a user who
+    undid a mistake, closed the tab and reopened found the mistake waiting for them."""
+    session, _ = _deck_with_a_title(tmp_path)
+    _add_slide(session, "Second")
+    assert router.dispatch(session, "undo")["ok"]
+
+    store, report = Workspace(tmp_path / "ws").restore()
+    assert _titles(store) == ["First"], "the undone slide came back"
+    assert report["turns"] == 1, "the live turn, not the one that was taken back off"
+    assert report["undone"] == 1, "'resumed 2 turns' would describe the file, not the deck"
+
+
+def test_undo_then_redo_lands_where_the_user_left_it(tmp_path) -> None:
+    """Redo is durable for the same reason undo is: it moved the deck. A restart that
+    honoured the undo and forgot the redo would be a different kind of the same bug."""
+    session, _ = _deck_with_a_title(tmp_path)
+    _add_slide(session, "Second")
+    assert router.dispatch(session, "undo")["ok"]
+    assert router.dispatch(session, "redo")["ok"]
+
+    store, report = Workspace(tmp_path / "ws").restore()
+    assert _titles(store) == ["First", "Second"]
+    assert report["turns"] == 2
+    assert "undone" not in report, "nothing is undone, so nothing is worth reporting"
+
+
+def test_repeated_undo_survives_all_the_way_back(tmp_path) -> None:
+    """Not just the last one. Two undos leave two turns on file that must not be replayed,
+    and a fix that only tracked the most recent would restore the middle one."""
+    session, _ = _deck_with_a_title(tmp_path)
+    _add_slide(session, "Second")
+    _add_slide(session, "Third")
+    assert router.dispatch(session, "undo")["ok"]
+    assert router.dispatch(session, "undo")["ok"]
+
+    store, report = Workspace(tmp_path / "ws").restore()
+    assert _titles(store) == ["First"]
+    assert report["turns"] == 1
+    assert report["undone"] == 2
+
+
+def test_the_journal_replay_path_honours_an_undo(tmp_path, fixture_deck) -> None:
+    """The case a re-snapshot alone silently gets wrong. With neither snapshot readable the
+    journal is the only source of truth, and one carrying just the forward turns replays the
+    undone edit straight back onto the source file."""
+    session, _ = Session.resume(fixture_deck, root=tmp_path)
+    workspace = session.workspace
+    slide = next(s for s in session.deck.slides for sh in s.shapes
+                 if sh.text and not sh.opaque)
+    shape = next(sh for sh in slide.shapes if sh.text and not sh.opaque)
+    original = shape.text
+    router.dispatch(session, "set_text",
+                    {"target": f"{slide.id}/{shape.id}", "text": "Undone"})
+    assert router.dispatch(session, "undo")["ok"]
+
+    workspace.snapshot.unlink()
+    workspace.backup.unlink(missing_ok=True)
+
+    store, report = Workspace(workspace.root).restore(fixture_deck)
+    assert report["from"] == "journal"
+    assert store.deck.slide(slide.id).shape(shape.id).text == original
+    assert report["turns"] == 0, "nothing was replayed, and the note says so"
+    assert "replayed 0 turns" in report["note"]
+
+
+def test_the_redo_stack_survives_the_restart_too(tmp_path) -> None:
+    """Redo history is not the price of making undo durable. The undone turn is still on
+    file with its ops — only the record of it being live changed — so a resumed session can
+    still put it back, and `restore` derives the stack from exactly that."""
+    session, _ = _deck_with_a_title(tmp_path)
+    _add_slide(session, "Second")
+    assert router.dispatch(session, "undo")["ok"]
+
+    store, _ = Workspace(tmp_path / "ws").restore()
+    assert _titles(store) == ["First"]
+    assert store.redo() is True
+    assert _titles(store) == ["First", "Second"]
+
+
+def test_repeated_undo_redoes_in_the_order_it_was_undone(tmp_path) -> None:
+    """The restored stack is a stack, not a set: redo puts the *oldest* undone turn back
+    first, or the deck is rebuilt out of order."""
+    session, _ = _deck_with_a_title(tmp_path)
+    _add_slide(session, "Second")
+    _add_slide(session, "Third")
+    assert router.dispatch(session, "undo")["ok"]
+    assert router.dispatch(session, "undo")["ok"]
+
+    store, _ = Workspace(tmp_path / "ws").restore()
+    assert store.redo() is True
+    assert _titles(store) == ["First", "Second"]
+    assert store.redo() is True
+    assert _titles(store) == ["First", "Second", "Third"]
+    assert store.redo() is False
+
+
+def test_a_turn_committed_after_an_undo_closes_the_redo_stack(tmp_path) -> None:
+    """The case a *stored* undo stack would get wrong. Committing over an undone turn
+    discards it for good (`transaction` clears the stack), so a restore must not offer it
+    back — and deriving the stack from the journal's live frontier gets that for free."""
+    session, _ = _deck_with_a_title(tmp_path)
+    _add_slide(session, "Second")
+    assert router.dispatch(session, "undo")["ok"]
+    _add_slide(session, "Third")
+
+    store, _ = Workspace(tmp_path / "ws").restore()
+    assert _titles(store) == ["First", "Third"]
+    assert store.redo() is False, "the undone turn was written over, not parked"
+    assert store.undo() is True, "and undo still reaches the turn that replaced it"
+    assert _titles(store) == ["First"]
+
+
+def test_a_half_written_undo_record_is_dropped_like_any_other(tmp_path) -> None:
+    """A crash mid-append, on the record saying a turn came off the deck. Losing it means
+    the undo never happened — which is where the snapshot is too, because the journal is
+    written first and the snapshot after."""
+    session, workspace = _deck_with_a_title(tmp_path)
+    _add_slide(session, "Second")
+    with open(workspace.journal, "a", encoding="utf-8") as handle:
+        handle.write('{"event": "un')
+
+    turns = Workspace(tmp_path / "ws").turns()
+    assert len(turns) == 2
+    assert all(t.committed for t in turns), "an unfinished undo did not happen"
+
+
+def test_an_undo_record_naming_an_unknown_turn_stops_replay(tmp_path) -> None:
+    """Same rule as a bad turn line. A record that cannot be placed in the history means
+    something else wrote here, and honouring what follows it would apply ops out of order."""
+    session, workspace = _deck_with_a_title(tmp_path)
+    _add_slide(session, "Second")
+    first, second = workspace.journal.read_text().splitlines()
+    workspace.journal.write_text(
+        f'{first}\n{{"event": "undo", "turn": 77}}\n{second}\n', encoding="utf-8")
+
+    turns = Workspace(tmp_path / "ws").turns()
+    assert len(turns) == 1, "replay stopped at the record it could not place"
+    assert turns[0].committed
+
+
+def test_undoing_an_added_asset_removes_it_from_disk_too(tmp_path) -> None:
+    """Pictures live outside the document model, so re-snapshotting the deck says nothing
+    about them. An `assets/index.json` still naming an undone key resurrects the picture on
+    the next restore, exactly as the journal would resurrect the turn."""
+    from PIL import Image
+
+    session = Session.blank("Assets")
+    workspace = Workspace(tmp_path / "ws")
+    workspace.attach(session.store)
+    path = tmp_path / "shot.png"
+    # Generated rather than committed, as in `test_assets`: a binary in the repository is a
+    # thing to explain, and this test cares only that the bytes are a real image.
+    Image.new("RGB", (32, 20), (0x15, 0x60, 0x82)).save(path)
+    key = router.dispatch(session, "add_asset", {"path": str(path)})["after"]["asset_id"]
+    assert router.dispatch(session, "undo")["ok"]
+
+    store, _ = Workspace(tmp_path / "ws").restore()
+    assert key not in store.assets, "the index still named a picture the user took out"
 
 
 def test_removing_a_block_survives_and_reverses(tmp_path) -> None:

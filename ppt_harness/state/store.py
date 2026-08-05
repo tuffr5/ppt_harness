@@ -55,6 +55,13 @@ class DeckStore:
         #: workspace: persistence is a policy the caller opts into, and a store used in a
         #: test or a one-shot CLI call should not touch the filesystem at all.
         self.on_commit: Callable[[Turn], None] | None = None
+        #: Called when a committed turn is taken back off the deck, and when an undone one
+        #: is put back. Separate hooks from `on_commit` because they carry no new ops —
+        #: they change which of the *recorded* turns are live. Undo used to notify nothing,
+        #: which meant a user who undid a mistake and reopened the deck found it back: the
+        #: deck moved and neither the journal nor the snapshot heard about it.
+        self.on_undo: Callable[[Turn], None] | None = None
+        self.on_redo: Callable[[Turn], None] | None = None
         #: key -> (content type, bytes) for pictures pulled out of the package, and for
         #: pictures `add_asset` ingested. Deliberately *not* on `Deck`: the document model is
         #: dumped whole for every invertible op, and carrying image bytes through undo would
@@ -118,6 +125,17 @@ class DeckStore:
     # -- undo / redo ------------------------------------------------------------
 
     def undo(self) -> bool:
+        """Take the last live turn back off the deck.
+
+        Invariant, and the thing a restore leans on: undo only ever takes the newest live
+        turn and redo only ever puts back the newest undone one, so the undone turns are
+        always the *tail* of the log — never a hole in the middle of it. That is what makes
+        a replay that simply skips them equal to a replay that applies them and then applies
+        their inverses, which is what the deck in memory actually did (DESIGN §1.6).
+
+        Committing a new turn appends past that tail and clears the redo stack, so an
+        undone turn with a live turn after it is dead for good rather than merely parked.
+        """
         turn = next((t for t in reversed(self.log.turns) if t.committed and t.ops), None)
         if turn is None:
             return False
@@ -125,6 +143,11 @@ class DeckStore:
             self._apply(inverse)
         turn.committed = False
         self._undone.append(turn)
+        # After the deck has actually moved, so what reaches disk is a fact rather than an
+        # intention — the same order, and the same "a persistence failure is worth crashing
+        # over" policy, as a commit.
+        if self.on_undo is not None:
+            self.on_undo(turn)
         return True
 
     def redo(self) -> bool:
@@ -134,7 +157,25 @@ class DeckStore:
         for op in turn.ops:
             self._apply(op)
         turn.committed = True
+        if self.on_redo is not None:
+            self.on_redo(turn)
         return True
+
+    # -- history ----------------------------------------------------------------
+
+    def restore_history(self, turns: list[Turn]) -> None:
+        """Adopt history recorded before this process started, undo stack included.
+
+        The undo stack is *derived*, not stored: by the tail invariant in `undo`, the
+        redoable turns are exactly those after the last live one, and `redo` pops them
+        oldest-first — so reversing that tail reproduces the stack the previous process
+        held, exactly. Deriving it also gets the one case a stored stack would get wrong for
+        free: committing a new turn clears the stack (see `transaction`), and after that
+        commit the undone turns are no longer the tail, so nothing is offered for redo.
+        """
+        self.log.restore(turns)
+        live = max((i for i, t in enumerate(turns) if t.committed), default=-1)
+        self._undone = list(reversed(turns[live + 1:]))
 
     # -- resolution -------------------------------------------------------------
 
