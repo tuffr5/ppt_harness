@@ -23,11 +23,17 @@ from ..core.loop import Agent
 from ..core.session import Session
 from ..fidelity import reference
 from ..render import browser, html, preview
+from ..state import templates
 from ..tools import router
 
 
 class Ask(BaseModel):
     prompt: str
+
+
+class Start(BaseModel):
+    template: str
+    title: str | None = None
 
 
 class Edit(BaseModel):
@@ -232,6 +238,91 @@ def create_app(session: Session, *, model: str | None = None,
                                  headers={"Cache-Control": "no-cache",
                                           "X-Accel-Buffering": "no"})
 
+    # -- starting over ----------------------------------------------------------
+
+    @app.get("/api/templates")
+    def template_list() -> dict[str, Any]:
+        """The themes a deck can start on, for the picker.
+
+        `--from company.pptx` remains the honest way to start and the CLI still says so; this
+        is the same list `ppt-harness templates` prints, for somebody who has nothing to
+        borrow and is already in the browser.
+        """
+        return {
+            "templates": [
+                {"name": t.name, "description": t.description, "summary": t.summary(),
+                 "brand": t.theme.palette.get("brand", ""),
+                 "display": t.theme.type.families.get("display", "").split(",")[0]}
+                for t in templates.catalog()
+            ],
+            "current": session.deck.theme_from,
+            "started": bool(session.deck.slides),
+        }
+
+    @app.get("/api/templates/{name}/thumb.png")
+    def template_thumb(name: str) -> Response:
+        """One real slide on that theme, rendered.
+
+        A swatch of the brand colour would be cheaper and would be a lie: it shows the hue and
+        none of the things a person is actually choosing between — the display face, the type
+        scale, how a card sits on the background. The preview is the export, so the honest
+        thumbnail is free: build a slide, put it through the ordinary exporter, rasterise the
+        page. What the card shows is what the deck will be.
+
+        Cached on disk under the preview root. First call costs a render, the rest are a file
+        read, and a theme only changes when the harness ships a new one.
+        """
+        cached = preview.cache_root() / "thumbs" / f"{name}.png"
+        if not cached.exists():
+            try:
+                sample = Session.from_builtin(name, name)
+            except templates.TemplateError as exc:
+                raise HTTPException(404, str(exc)) from exc
+            router.dispatch(sample, "add_slide", {
+                "layout": "stack",
+                "blocks": [
+                    {"region": "header", "component": "slide_title",
+                     "slots": {"title": f"{name.title()} — a slide on this theme"}},
+                    {"region": "body", "component": "stat_row", "variant": "carded",
+                     "slots": {"items": [{"value": "38%", "label": "Latency"},
+                                         {"value": "2.4x", "label": "Growth"},
+                                         {"value": "$4.2M", "label": "ARR"}]}},
+                ],
+            })
+            try:
+                page = preview.PreviewCache(sample).page(sample.deck.slides[0].id, width=640)
+            except preview.PreviewUnavailable as exc:
+                raise HTTPException(503, str(exc)) from exc
+            cached.parent.mkdir(parents=True, exist_ok=True)
+            cached.write_bytes(page.png)
+        return Response(cached.read_bytes(), media_type="image/png",
+                        headers={"Cache-Control": "max-age=86400"})
+
+    @app.post("/api/start")
+    def start(body: Start) -> dict[str, Any]:
+        """Begin a new deck on a chosen theme, discarding the current one.
+
+        Rebinding rather than restarting the process: every route closes over `session` and
+        `cache` as *variables*, so `nonlocal` reaches all of them at once and there is no
+        registry of consumers to keep in step. The agent goes with them — a conversation
+        about the old deck would describe slides that no longer exist.
+
+        Deliberately not undoable. Undo is scoped to a turn within a deck, and a store whose
+        log spanned two decks could roll back into one the user had abandoned.
+        """
+        nonlocal session, cache
+        if session.workspace is not None:
+            raise HTTPException(409, "this deck is persistent; start a new one with "
+                                     "`ppt-harness serve --template <name>`")
+        try:
+            session = Session.from_builtin(body.template, body.title or "Untitled")
+        except templates.TemplateError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        cache = preview.PreviewCache(session)
+        state["agent"] = Agent(session, **agent_kw)
+        threading.Thread(target=cache.warm, daemon=True).start()
+        return session.outline()
+
     def _slide_or_404(slide_id: str):
         slide = session.deck.slide(slide_id)
         if slide is None:
@@ -307,6 +398,44 @@ PAGE = r"""<!doctype html>
     background:var(--bg); color:var(--ink);
     font:14px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
     transition:grid-template-columns .18s ease;
+  }
+  /* The picker covers the whole app rather than sitting in the stage: until a theme is
+     chosen every control behind it acts on a deck the user has not agreed to yet. */
+  #start {
+    position:fixed; inset:0; z-index:20; display:grid; place-items:center;
+    background:rgba(15,17,21,.94); padding:24px; overflow:auto;
+  }
+  #start .sheet { width:min(760px,100%); }
+  #start h2 { margin:0 0 6px; font-size:20px; letter-spacing:.2px; }
+  #start .lead { margin:0 0 20px; color:var(--muted); max-width:62ch; }
+  /* `serve --from company.pptx` is one token to a reader; letting it wrap mid-flag turns it
+     into two commands that do not exist. */
+  #start code { background:var(--panel); padding:1px 5px; border-radius:4px; white-space:nowrap; }
+  /* Two columns, not auto-fit: four themes into a three-up grid strands one on a row of its
+     own, and the picker is the first thing anybody sees. */
+  #cards { display:grid; gap:16px; grid-template-columns:repeat(2,1fr); }
+  @media (max-width:640px) { #cards { grid-template-columns:1fr; } }
+  .card {
+    display:flex; flex-direction:column; text-align:left; padding:0 0 14px;
+    border:1px solid var(--line); border-radius:10px; background:var(--panel);
+    color:var(--ink); cursor:pointer; overflow:hidden; font:inherit;
+    transition:border-color .12s ease, transform .12s ease;
+  }
+  .card:hover, .card:focus-visible { border-color:var(--accent); transform:translateY(-2px); }
+  .card[aria-busy="true"] { opacity:.55; pointer-events:none; }
+  /* A real slide on that theme, rendered through the ordinary exporter — see
+     `/api/templates/{name}/thumb.png`. The 16:9 box is reserved before the image arrives so
+     four cards do not jump about as they load. */
+  .card .shot {
+    display:block; width:100%; aspect-ratio:16/9; object-fit:cover;
+    background:var(--bg); border-bottom:1px solid var(--line);
+  }
+  .card .name { display:block; padding:12px 14px 0; font-weight:650; }
+  .card .desc {
+    display:block; padding:4px 14px 0; color:var(--muted); font-size:12.5px;
+    /* Descriptions differ by a line or two; clamping keeps every card the same height so the
+       grid reads as a set rather than as four ragged boxes. */
+    display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden;
   }
   /* Collapsed to a hairline rather than hidden: the preview gets the room, and the drawer
      stays where the user last saw it instead of reflowing back in. */
@@ -433,6 +562,14 @@ PAGE = r"""<!doctype html>
   <div id="stage"><iframe id="frame" title="slide preview"></iframe></div>
   <div id="status"></div>
 </main>
+<div id="start" hidden>
+  <div class="sheet">
+    <h2>Start a deck</h2>
+    <p class="lead">Pick a theme to work on. Nothing is written until you ask for a slide —
+      and <code>serve --from company.pptx</code> borrows your own instead of any of these.</p>
+    <div id="cards"></div>
+  </div>
+</div>
 <script>
 const $ = s => document.querySelector(s);
 const log = $('#log'), stage = $('#stage'), frame = $('#frame');
@@ -692,12 +829,51 @@ $('#export').onclick = async () => {
   say('system', r.summary || JSON.stringify(r));
 };
 
+// The picker, offered only for a deck with nothing in it. A deck with slides — imported,
+// resumed, or already written into — is one the user has committed to, and replacing it
+// from a card grid is not a choice anybody came here to make.
+async function offerStart() {
+  const data = await (await fetch('/api/templates')).json();
+  if (data.started) return false;
+  const cards = $('#cards');
+  cards.textContent = '';
+  for (const t of data.templates) {
+    const card = el('button', 'card');
+    card.type = 'button';
+    const shot = el('img', 'shot');
+    shot.src = `/api/templates/${encodeURIComponent(t.name)}/thumb.png`;
+    shot.alt = `A slide on the ${t.name} theme`;
+    shot.loading = 'lazy';
+    // A renderer is optional — no LibreOffice, no thumbnail. The card still names and
+    // describes the theme, so the picker degrades to what it was rather than to a broken
+    // image icon.
+    shot.onerror = () => shot.remove();
+    card.append(shot, el('span', 'name', t.name), el('span', 'desc', t.description));
+    card.onclick = async () => {
+      card.setAttribute('aria-busy', 'true');
+      const res = await fetch('/api/start',
+        {method: 'POST', headers: {'Content-Type': 'application/json'},
+         body: JSON.stringify({template: t.name})});
+      if (!res.ok) { card.removeAttribute('aria-busy'); return; }
+      // Reload rather than patch: a new session means a new transcript, a new preview cache
+      // and a new agent, and every one of those is already correct on a fresh page.
+      location.reload();
+    };
+    cards.append(card);
+  }
+  $('#start').hidden = false;
+  return true;
+}
+
 // Outline first so the deck is on screen while the model composes; the greeting only for a
 // conversation with nothing in it, since a reload replays the transcript and a hello pasted
 // under yesterday's turns would claim to be the newest thing said.
 (async () => {
   await loadOutline();
-  if (!await restoreTranscript()) greet();
+  if (await restoreTranscript()) return;
+  // The picker outranks the greeting: a hello about a deck the user is still choosing would
+  // be answering a question they have not asked yet.
+  if (!await offerStart()) greet();
 })();
 </script>
 </body></html>
