@@ -34,6 +34,7 @@ from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from ..render import budget
 from ..state import richtext
 from ..state.document import Deck, Mode, Slide
 
@@ -98,6 +99,10 @@ ORDER = (
     "bullet_stop_mixed",
     "bullet_stop_drift",
     "bullet_case_mixed",
+    # Last on purpose. Every rule above says the deck means something other than intended or
+    # says it inconsistently; this one says a line that is correct could be set better, which
+    # is the finding a reader is most entitled to ignore.
+    "cramped_title",
 )
 
 
@@ -341,6 +346,29 @@ SLIDE_RULES = (_topic_title, _title_conjunction, _crowded_list, _wall_of_text,
                _bullet_stop_mixed, _bullet_case_mixed)
 
 
+def _cramped_title(deck: Deck, slide: Slide) -> Iterator[Finding]:
+    """A title that fits and still reads as cramped.
+
+    The one rule here that measures. It belongs on this side of the line anyway: `lint`
+    answers *does it fit* and this text does, by the same ruler. That it fills the box to
+    the edge is a composition judgement, and a judgement that could refuse a write would
+    make `budget_exceeded` mean two different things — see `budget.COMPOSITION_CAPACITY`,
+    which is where these fractions live and why they are not in the gate.
+
+    Silent wherever the gate already spoke, so a title that overflows is one message rather
+    than two.
+    """
+    for crowding in budget.crowded(deck.theme, slide):
+        yield Finding(
+            rule="cramped_title", slide_id=slide.id, where=crowding.block_id,
+            message=f"{slide.id}'s {crowding.role} fills {crowding.fill:.0%} of its box "
+                    f"({crowding.why}).",
+            suggestion=f"It fits, so nothing is broken — but under {crowding.allowed:.0%} "
+                       "reads as composed rather than packed. Shorten it, or let the "
+                       "layout give it more room.",
+        )
+
+
 # --------------------------------------------------------------------------- deck rules
 
 
@@ -424,11 +452,16 @@ def review(deck: Deck) -> list[Finding]:
     the deck, and a single slide cannot be inconsistent with itself. Filtering is the
     caller's job and happens after.
     """
-    reads = [read(s) for s in deck.slides if not s.hidden]
+    live = [s for s in deck.slides if not s.hidden]
+    reads = [read(s) for s in live]
     found: list[Finding] = []
     for r in reads:
         for rule in SLIDE_RULES:
             found.extend(rule(r))
+    # Takes the slide rather than the `Read`, because it is the one rule that needs geometry
+    # and a `Read` is deliberately text only.
+    for slide in live:
+        found.extend(_cramped_title(deck, slide))
     for deck_rule in DECK_RULES:
         found.extend(deck_rule(reads))
 

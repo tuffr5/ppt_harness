@@ -304,3 +304,42 @@ def test_a_hidden_slide_is_not_reviewed() -> None:
     session = deck_of(Session.blank("D"), managed("s1", 0, title="Revenue analysis"))
     session.deck.slides[0].hidden = True
     assert router.dispatch(session, "review_deck")["findings"] == []
+
+
+# --------------------------------------------------------------------------- composition
+
+
+#: Long enough that a `slide_title` fills more than 85% of its two lines, and short enough
+#: that it still fits them. Built by hand because that window is narrow: past it the gate
+#: refuses the write and this rule is deliberately silent.
+CRAMPED = ("Churn doubled across EMEA while retention retention retention retention "
+           "retention retention retention retention retention retention")
+
+
+def test_a_cramped_title_is_a_finding_and_not_a_refusal() -> None:
+    """The split this rule exists to make.
+
+    The gate accepts the write — the text fits, measured — and `review` says it reads as
+    packed. If this ever refuses, `budget_exceeded` has gone back to meaning two things.
+    """
+    session = Session.blank("D")
+    written = router.dispatch(session, "add_slide", {
+        "layout": "stack",
+        "blocks": [{"region": "header", "component": "slide_title",
+                    "slots": {"title": CRAMPED}}]})
+    assert written["ok"], "a title that fits must not be refused for looking cramped"
+    assert "cramped_title" in rules(review.review(session.deck))
+
+
+def test_a_title_with_room_to_spare_says_nothing() -> None:
+    """The negative case that keeps the rule usable. Real titles land at a quarter to a half
+    of their box, so anything chattier than this would fire on almost every slide."""
+    session = deck_of(Session.blank("D"), managed("s1", 0, title="Churn doubled in EMEA"))
+    assert "cramped_title" not in rules(review.review(session.deck))
+
+
+def test_an_overflowing_title_is_left_to_lint() -> None:
+    """Silence where the gate already spoke. Saying "and it looks cramped" about text that
+    does not fit is noise stacked on a fact."""
+    session = deck_of(Session.blank("D"), managed("s1", 0, title="overflowing " * 60))
+    assert "cramped_title" not in rules(review.review(session.deck))

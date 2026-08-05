@@ -25,8 +25,8 @@ from typing import Any
 
 from ..components import registry
 from ..state import richtext, slots
-from ..state.document import Shape, Theme, TypeSpec
-from . import measure
+from ..state.document import Mode, Shape, Slide, Theme, TypeSpec
+from . import expand, measure
 from .expand import LaidOutSlot
 
 #: Fallback fidelity margin as a fraction of capacity, until `fidelity/margins.generated.json`
@@ -40,6 +40,155 @@ HINT_SCRIPTS = ("latin", "cjk")
 
 
 @dataclass(frozen=True)
+class RoleCapacity:
+    """How much of a slot's geometric capacity a type role is allowed to spend, and why.
+
+    The `why` is not decoration. It is the sentence the refusal carries: a writer told
+    "~51 chars" for a box that geometrically holds sixty will otherwise read the number as
+    a measurement bug, and the next thing they do is stop trusting the gate.
+    """
+
+    fraction: float
+    why: str
+
+
+#: Role → the share of its box a slot may fill — DESIGN §2 (the type scale is roles) and
+#: §3.1 (a budget is a function of where the text sits, not of the box alone).
+#:
+#: **This is a second discount, and it is not the fidelity margin.** `DEFAULT_MARGIN` prices
+#: *measurement uncertainty*: the §6.3 causes — shaping, line-break rules, font substitution
+#: — under which our ruler and PowerPoint's disagree about text neither of them thinks is
+#: over. This table prices *composition*: text that both rulers agree fits, and that still
+#: lands wrong. Different causes, so they compose (`geometric × (1 - margin) × fraction`)
+#: rather than one subsuming the other — but a reader comparing capacities against the box
+#: should expect both to be in play.
+#:
+#: The fractions grade with type size, because the fault they guard against does. A face set
+#: large fills its box in few enough glyphs that the last one lands hard against the edge,
+#: and at 52px that gap is the first thing on the slide the eye measures; at 20px body it is
+#: a line ending, which is what line endings look like. `label` and `stat` break the grading
+#: for a different reason, stated per entry: their capacity is nominally multi-line and their
+#: content is not, so the fraction is what stops a budget from *offering* a second line to
+#: content that is broken by taking it.
+#:
+#: A role absent here is undiscounted. A role added to a theme's scale tomorrow gets the
+#: neutral value rather than an accidental tightening nobody chose.
+#: Roles whose crowding is a *composition* fault, reported by `review` and never refused —
+#: DESIGN §5 (three gates) against §5.5 (deck-level checks).
+#:
+#: These began in `ROLE_CAPACITY` below and were moved out deliberately. `budget_exceeded`
+#: is the harness's one unarguable sentence: the text does not fit, measured, and here is by
+#: how much. A title at 88% of its box *does* fit — it reads as cramped, which is a
+#: judgement, and a judgement wearing the same error code as a measurement teaches a model
+#: that the measurement is negotiable. So the fractions survive, the gate does not apply
+#: them, and `review` says the same thing where being wrong is allowed.
+#:
+#: The two that stayed are not the same claim. A `stat` or a `label` that spends its whole
+#: box takes a second line, and neither is legible as two — that is still a fit fact.
+COMPOSITION_CAPACITY: dict[str, RoleCapacity] = {
+    # The largest face in the deck, usually alone on a cover with the most room to give
+    # back. Its crowding is also the most conspicuous in the deck — there is nothing else on
+    # the slide to look at instead.
+    "deck_title": RoleCapacity(0.80, "a cover title set edge to edge reads as cramped"),
+    # Large, and read first on every slide that has one. Same fault as `deck_title`, one
+    # step down the scale, so one step less discount.
+    "slide_title": RoleCapacity(0.85, "a title set edge to edge reads as cramped"),
+    # One step above `body`, and it names a block rather than the slide — the eye reads it
+    # as part of the thing it labels, not as the composition. The lightest hand of the three
+    # titles, because it is the one closest to being prose.
+    "block_title": RoleCapacity(0.90, "a heading reads as part of its block, but not "
+                                      "edge to edge"),
+}
+
+
+ROLE_CAPACITY: dict[str, RoleCapacity] = {
+    # A figure is one line by construction and disastrous as two: "$4.2" over "M" is not a
+    # number any more. Discounted with `label` rather than with the display faces it shares
+    # a size with, because what is being bought is the second line, not the margin.
+    #
+    # This is also the only place in the catalog where a discount meets a decoration `pad`:
+    # `stat_row/carded` spends 10.9% of its cell on the card before this fraction applies,
+    # so a carded figure ends at 0.62 of the row's geometry — the tightest total anywhere
+    # here. Not double-charging, because the two are not the same claim: the pad is *box*
+    # (the words are drawn inside the card, and the measurer has to know that or it and the
+    # renderer disagree), the fraction is *policy*. Worth knowing it is the value most
+    # likely to be the one that is wrong; the catalog's own worst case still lands at 0.41.
+    "stat": RoleCapacity(0.70, "a figure that wraps stops reading as a number"),
+    # A label is a noun phrase in a cell; `max_lines` is 2 only so a long one degrades
+    # rather than clips, and budgeting it at the full two lines is how the gate ends up
+    # certifying the wrapped version as fitting. Read as a line count rather than as a
+    # margin, 0.70 of two lines is "you may run onto a second line, but not fill it", which
+    # is the difference between a deliberate two-line label and a sentence in a cell.
+    #
+    # The tightest fixture in the catalog after this change (`icon_row/icon_top` at 0.67 of
+    # budget, from 0.47), so it is the first value to relax if the refusal rate moves.
+    "label": RoleCapacity(0.70, "a label that wraps reads as broken"),
+    # `body` and `caption` are deliberately absent — prose is *meant* to fill its measure,
+    # and a line that reaches the end of it is what a measure is for. Discounting them would
+    # refuse sentences that read correctly, and `body` is where the catalog's own worst-case
+    # fixtures already run closest to the line (0.61 of capacity, against 0.29 for a title),
+    # so it is also where a discount would do the most damage. `caption` is the same
+    # argument at a smaller size: it is prose, it wraps, and wrapping is not a fault in it.
+    # Keeping `body` at 1.0 additionally means this table cannot hide a global tightening —
+    # every entry here is a statement about a role, not about the ruler.
+}
+
+
+def role_capacity(role: str) -> RoleCapacity | None:
+    """The discount a role carries, or `None` where it carries none."""
+    return ROLE_CAPACITY.get(role)
+
+
+@dataclass(frozen=True)
+class Crowding:
+    """A composition role filling more of its box than it reads well at."""
+
+    slide_id: str
+    block_id: str
+    slot: str
+    role: str
+    fill: float
+    """Share of the *geometric* box the text spends — 1.0 is edge to edge."""
+    allowed: float
+    why: str
+
+
+def crowded(theme: Theme, slide: Slide) -> list[Crowding]:
+    """Composition roles on one slide that fit and still read as cramped.
+
+    The same ruler as the gate, deliberately: this measures with `measure.measure` against
+    the same shaped advance width, so `review` cannot disagree with `lint` about a number
+    they both derived. What differs is only the verdict — over a `COMPOSITION_CAPACITY`
+    fraction is a finding, and a finding never refused anything.
+
+    Silent on anything the gate would already have stopped. A slot whose text does not fit
+    is a `lint` problem with its own message, and saying "also, it looks cramped" about text
+    that overflows is noise on top of a fact.
+    """
+    if slide.mode is not Mode.MANAGED:
+        return []
+    out: list[Crowding] = []
+    for laid_out in expand.expand_slide(theme, slide):
+        rule = COMPOSITION_CAPACITY.get(laid_out.role)
+        if rule is None:
+            continue
+        text = _as_text(slide.block(laid_out.block_id).slots.get(laid_out.slot))
+        if not text:
+            continue
+        budget = for_slot(theme, laid_out)
+        used = measure.measure(text, budget.stack, budget.spec.size, budget.spec.track)
+        geometric = budget.geometric_em
+        if not geometric or used.width_em > geometric:
+            continue
+        fill = used.width_em / geometric
+        if fill > rule.fraction:
+            out.append(Crowding(slide_id=slide.id, block_id=laid_out.block_id,
+                                slot=laid_out.slot, role=laid_out.role, fill=fill,
+                                allowed=rule.fraction, why=rule.why))
+    return out
+
+
+@dataclass(frozen=True)
 class Budget:
     """What a slot can hold, and how to say so."""
 
@@ -50,11 +199,26 @@ class Budget:
     spec: TypeSpec
     stack: str
     margin: float = DEFAULT_MARGIN
+    role: str = ""
+    """The theme type-scale entry this slot is set in — carried, not re-derived, because the
+    role is what selects the discount and the refusal has to be able to name it."""
+    discount: float = 1.0
+    """The `ROLE_CAPACITY` fraction already applied to `capacity_em`. 1.0 where the role
+    carries none, so nothing downstream has to branch on whether a discount exists."""
     context: dict[str, Any] = field(default_factory=dict)
 
     @property
     def capacity_px(self) -> float:
         return self.capacity_em * self.spec.size
+
+    @property
+    def geometric_em(self) -> float:
+        """Capacity before the role discount — what the box holds, not what the role may use.
+
+        Only ever reported. Nothing compares text against this number; if it did, the
+        discount would be advice rather than a budget.
+        """
+        return self.capacity_em / self.discount if self.discount else self.capacity_em
 
     def hint(self, theme: Theme) -> dict[str, int]:
         """Approximate character counts per script. Guidance only."""
@@ -96,8 +260,27 @@ class BudgetResult:
             f"  capacity {self.budget.capacity_em:.1f}ew "
             f"(~{hint[self._hint_key()]} {self._hint_key()} chars) · "
             f"got {self.used_em:.1f}ew (~{used_chars})\n"
+            f"{self._why_discounted()}"
             f"  options: " + " · ".join(self.options)
         )
+
+    def _why_discounted(self) -> str:
+        """The role discount, said out loud — or nothing where there is none.
+
+        A capacity that is 70% of the box the writer can see is a number they cannot check,
+        and an unexplained one reads as the measurer being wrong rather than as a rule they
+        could have planned around. It sits between the numbers and the ways out because that
+        is what it is: the last of the numbers, and the reason the first of them is smaller
+        than the box.
+        """
+        rule = ROLE_CAPACITY.get(self.budget.role)
+        if self.budget.discount >= 1.0 or rule is None:
+            # Asked of the budget, not of the table: a freeform shape carries a role it was
+            # imported with and no discount, and quoting a rule that was never applied to
+            # its capacity would be the same lie in the other direction.
+            return ""
+        return (f"  a {self.budget.role} is budgeted at {self.budget.discount:.0%} of its "
+                f"box ({self.budget.geometric_em:.1f}ew): {rule.why}\n")
 
     def _hint_key(self) -> str:
         return "cjk" if self.script in ("han", "kana", "hangul") else "latin"
@@ -113,8 +296,9 @@ def _stack_for(theme: Theme, spec: TypeSpec) -> str:
 def for_slot(theme: Theme, laid_out: LaidOutSlot) -> Budget:
     """Budget for a managed slot, from its expanded geometry.
 
-    Capacity is width times line count, less the margin — the total advance width the slot
-    can absorb before it overflows its own box.
+    Capacity is width times line count, less the margin and less the role's share — the
+    total advance width the slot can absorb before it overflows its own box, and then the
+    part of that a slot in this role is allowed to spend (`ROLE_CAPACITY`).
     """
     spec = laid_out.spec
     stack = _stack_for(theme, spec)
@@ -133,7 +317,15 @@ def for_slot(theme: Theme, laid_out: LaidOutSlot) -> Budget:
         lines_by_height = 2 if cell.h >= spec.line * (1 + slots.STAT_LABEL_EM) else 1
     lines = min(laid_out.max_lines, lines_by_height)
     width_px = cell.w
-    capacity_em = (width_px / spec.size) * lines * (1 - DEFAULT_MARGIN)
+    # The discount lands on the total advance width and *not* on `width_px`, which is what
+    # keeps it a composition rule rather than a second geometry. Narrowing the wrap width
+    # would make the measurer break lines where the renderer will not, and the two agreeing
+    # about where the text breaks is the whole basis for comparing them at all. Charged this
+    # way, a discounted slot may still use every line it has — it just may not end the last
+    # of them against the edge.
+    discount = ROLE_CAPACITY.get(laid_out.role)
+    fraction = discount.fraction if discount else 1.0
+    capacity_em = (width_px / spec.size) * lines * (1 - DEFAULT_MARGIN) * fraction
     return Budget(
         target=f"{laid_out.block_id}/{laid_out.slot}",
         capacity_em=capacity_em,
@@ -141,6 +333,8 @@ def for_slot(theme: Theme, laid_out: LaidOutSlot) -> Budget:
         width_px=width_px,
         spec=spec,
         stack=stack,
+        role=laid_out.role,
+        discount=fraction,
         context={"slot": laid_out.slot, "n_items": laid_out.items,
                  "columns": laid_out.columns},
     )
@@ -154,6 +348,12 @@ def for_shape(theme: Theme, shape: Shape, slide_cx: int, slide_cy: int) -> Budge
     against the theme's scale would report overflow on every caption set smaller than the
     theme's body size — a slide the file does not contain. The theme role is only a fallback
     for shapes whose size nothing in the file states.
+
+    No role discount here, for the same reason. `ROLE_CAPACITY` is a rule about text this
+    harness is about to compose; an imported shape is text somebody already composed, in a
+    box they chose, and the role on it is our guess at what it was for. Discounting it would
+    report `budget_exceeded` on slides that are already in the file and render as their
+    author left them — the harness inventing an overflow rather than measuring one.
     """
     spec = shape.type_spec or theme.type.scale[
         shape.role if shape.role in theme.type.scale else "body"
@@ -171,6 +371,7 @@ def for_shape(theme: Theme, shape: Shape, slide_cx: int, slide_cy: int) -> Budge
         width_px=width_px,
         spec=spec,
         stack=stack,
+        role=shape.role or "",
         context={"slot": shape.role or "text", "region": "freeform"},
     )
 
@@ -235,12 +436,20 @@ def _check_stat(item: Any, budget: Budget, theme: Theme,
     })
     label_budget = Budget(
         target=budget.target,
-        capacity_em=(budget.width_px / small.size) * (1 - budget.margin),
+        # Rebuilt from the cell's width rather than divided out of the caller's capacity, so
+        # the role's discount has to be re-applied by hand — it is charged against the box,
+        # and this is a different type size in the same box. Inheriting the figure's
+        # discount rather than looking up `label`'s is deliberate: the caption under a
+        # figure is part of a `stat` cell, and a cell budgeted by two different rules is a
+        # cell whose two halves disagree about how much of it they may have.
+        capacity_em=(budget.width_px / small.size) * (1 - budget.margin) * budget.discount,
         max_lines=1,
         width_px=budget.width_px,
         spec=small,
         stack=budget.stack,
         margin=budget.margin,
+        role=budget.role,
+        discount=budget.discount,
         context={**budget.context, "part": "label"},
     )
     label = check(_as_text(item.get("label")), label_budget, theme, ways_out)
