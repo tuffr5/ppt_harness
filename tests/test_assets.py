@@ -476,3 +476,27 @@ def test_an_empty_deck_lists_nothing_rather_than_failing(blank: Session) -> None
     """Silence and emptiness read the same to a model, so the count is stated."""
     listed = router.dispatch(blank, "list_assets")
     assert listed["assets"] == [] and listed["count"] == 0
+
+
+def test_an_added_picture_survives_its_source_file_being_deleted(
+        imported: Session, tmp_path: Path) -> None:
+    """The last route that depended on a path outside the deck.
+
+    `_add_shape` wrote a freeform picture from `shape.source` — where the file was read from
+    on the machine that read it — so a deck exported after the original moved or was mailed
+    onward carried a picture nobody else could see. The bytes are in the store now; the path
+    is provenance. Deleting the file before exporting is the whole test.
+    """
+    source = _png(tmp_path / "vanishing.png")
+    slide_id = imported.deck.slides[0].id
+    added = router.dispatch(imported, "add_image", {
+        "slide_id": slide_id, "path": str(source), "alt": "A square", "region": "body"})
+    assert added["ok"], added.get("message")
+
+    source.unlink()
+    out = router.dispatch(imported, "export", {"path": str(tmp_path / "gone.pptx")})
+    assert out["ok"], out.get("violations")
+
+    with zipfile.ZipFile(tmp_path / "gone.pptx") as bundle:
+        assert [n for n in bundle.namelist() if n.startswith("ppt/media/")], \
+            "the picture did not reach the file"

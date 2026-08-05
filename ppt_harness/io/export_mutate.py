@@ -106,7 +106,8 @@ def _write_notes(slide, model: Slide) -> None:
     slide.notes_slide.notes_text_frame.text = model.notes or ""
 
 
-def _patch_freeform(slide, index: int, model: Slide, written: set[tuple[int, int]]) -> int:
+def _patch_freeform(slide, index: int, model: Slide, written: set[tuple[int, int]],
+                    assets: Assets | None = None) -> int:
     """Write back only shapes marked `dirty`.
 
     Everything else — including every opaque shape — is left exactly as the original author
@@ -131,7 +132,7 @@ def _patch_freeform(slide, index: int, model: Slide, written: set[tuple[int, int
     for shape_model in model.shapes:
         if shape_model.ooxml_id or shape_model.opaque:
             continue
-        added = _add_shape(slide, shape_model, model, index)
+        added = _add_shape(slide, shape_model, model, index, assets)
         if added is not None:
             shape_model.ooxml_id = added
             written.add((index, added))
@@ -471,14 +472,26 @@ CHART_TYPES = {
 }
 
 
-def _add_shape(slide, shape_model, model, index: int) -> int | None:
-    """Write a shape the harness created. Dispatches on what it is."""
+def _add_shape(slide, shape_model, model, index: int,
+               assets: Assets | None = None) -> int | None:
+    """Write a shape the harness created. Dispatches on what it is.
+
+    A picture comes out of the deck's assets, and falls back to its `source` path only when
+    the key resolves to nothing. The order matters: `source` is provenance — where the file
+    was read from on the machine that read it — and writing from it means a deck whose
+    picture exists on one laptop and nowhere else. `add_image` ingests, so the key is the
+    real answer and the path is a leftover; the fallback is kept for a shape recorded before
+    it did, and for that shape only.
+    """
     if shape_model.table is not None:
         return _add_table(slide, shape_model)
     if shape_model.chart is not None:
         return _add_chart(slide, shape_model)
-    if shape_model.source:
-        return _add_picture(slide, shape_model)
+    if shape_model.asset or shape_model.source:
+        asset = media_mod.resolve(shape_model.asset or "", assets)
+        if asset is not None:
+            return _add_picture(slide, shape_model, image=asset.image())
+        return _add_picture(slide, shape_model) if shape_model.source else None
     return _add_textbox(slide, shape_model, model, index)
 
 
@@ -1172,7 +1185,7 @@ def export(
                     )
                 clone = _clone_slide(prs, existing[origin])
                 index = list(prs.slides).index(clone)
-                report.shapes_patched += _patch_freeform(clone, index, model, written)
+                report.shapes_patched += _patch_freeform(clone, index, model, written, assets)
                 report.slides_written += 1
                 placed.append(clone)
                 continue
@@ -1204,7 +1217,7 @@ def export(
                     placed.append(list(prs.slides)[-1])
                 report.slides_written += 1
                 continue
-            report.shapes_patched += _patch_freeform(existing[index], index, model, written)
+            report.shapes_patched += _patch_freeform(existing[index], index, model, written, assets)
             placed.append(existing[index])
         else:
             before = len(prs.slides._sldIdLst)
